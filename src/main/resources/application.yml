@@ -1,0 +1,169 @@
+# ==================== 健身私教系统 - Java BFF 配置 ====================
+# 启动方式: mvn spring-boot:run 或 IDE 直接运行 FitnessApplication
+# 激活 Profile: spring.profiles.active=dev（虚拟机中间件）或 docker（本地Docker中间件）
+
+server:
+  port: 8080
+  servlet:
+    multipart:
+      enabled: true
+      # 允许用户上传手机直出原图（≤10MB）。
+      # ⚠️ 但 Java 转发给 Python 之前必须先压缩到 ≤1MB 再转 Base64：
+      #    10MB 原图 Base64 后约 13.3MB，JSON+HTTP 传输慢且字符串常驻 Java 堆内存。
+      #    压缩逻辑见 com.fitness.util.ImageCompressor（由 AiProxyService#evaluatePose 调用）。
+      max-file-size: 10MB
+      max-request-size: 12MB
+
+spring:
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:dev}
+
+  # --- 从项目根目录的 .env 读取环境变量 ---
+  # Spring Boot 原生不认识 .env；这里用 config.import 把它按 properties 格式导入，
+  # 于是 .env 里写的 MYSQL_PASSWORD / REDIS_PASSWORD 等就能被下面的 ${...} 占位符解析到。
+  # 前缀 optional: 表示文件不存在时不报错（继续用 application.yml 的默认值）；
+  # [.properties] 是显式指定解析格式（文件名没有 .properties 后缀时必须写）。
+  # 注意：路径相对「工作目录」，因此请在项目根目录启动（mvn spring-boot:run / IDEA 默认即是）。
+  config:
+    import: optional:file:.env[.properties]
+
+  # --- 应用名（日志 JSON 的 service 字段、链路追踪标识） ---
+  application:
+    name: java-bff
+
+  # --- 数据源（默认 dev 环境指向虚拟机） ---
+  datasource:
+    # URL 参数里三个都是踩过坑才补上的，改动前请先看注释：
+    # 1) characterEncoding 必须是 Java 字符集名 UTF-8，不能写 MySQL 的 utf8mb4
+    #    （Connector/J 建连接前就查字符集，写 utf8mb4 直接抛 UnsupportedEncodingException）
+    # 2) allowPublicKeyRetrieval=true：MySQL 8 的 root 用 caching_sha2_password，
+    #    在「非 TLS 连接 + 密码未进服务端缓存」时必须先取服务端 RSA 公钥来加密密码，
+    #    否则驱动抛 "Public Key Retrieval is not allowed" —— 实测没有它就连不上。
+    #    ⚠️ 生产环境应改用 TLS（sslMode=REQUIRED）而不是开这个开关，
+    #    因为它允许客户端向服务端索取公钥，存在中间人风险。
+    # 3) serverTimezone：MySQL 8 无默认时区，不指定会按 UTC 解析 LocalDateTime。
+    url: jdbc:mysql://${MYSQL_HOST:192.168.199.128}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:fitness_db}?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&createDatabaseIfNotExist=true
+    username: ${MYSQL_USERNAME:root}
+    password: ${MYSQL_PASSWORD:123456}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      pool-name: FitnessHikariCP
+      maximum-pool-size: 20
+      minimum-idle: 5
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      connection-timeout: 30000
+      connection-test-query: SELECT 1
+
+  # --- JPA ---
+  jpa:
+    hibernate:
+      ddl-auto: none              # 使用 sql/init.sql 手动管理表结构
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+        dialect: org.hibernate.dialect.MySQLDialect
+    open-in-view: false            # 避免懒加载导致的性能问题
+
+  # --- Redis（默认 dev 环境指向虚拟机） ---
+  data:
+    redis:
+      host: ${REDIS_HOST:192.168.199.128}
+      port: ${REDIS_PORT:6379}
+      # 密码只从环境变量取，不写默认值（虚拟机的 Redis 开了 requirepass，实测密码为 123456）。
+      # 启动前必须设置，否则所有缓存/分布式锁/Token 黑名单操作都会抛 NOAUTH：
+      #   PowerShell : $env:REDIS_PASSWORD="123456"; mvn spring-boot:run
+      #   IDEA       : Run Configuration → Environment variables 里加 REDIS_PASSWORD=123456
+      #   命令行一次  : mvn spring-boot:run -Dspring-boot.run.jvmArguments="-DREDIS_PASSWORD=123456"
+      password: ${REDIS_PASSWORD:}
+      database: 0
+      timeout: 3000ms
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+          min-idle: 4
+          max-wait: 3000ms
+
+  cache:
+    type: redis
+    redis:
+      time-to-live: 1800000
+      cache-null-values: false
+      # 必须加引号！裸标量不允许以 ':' 结尾：SnakeYAML 会把结尾的冒号当成映射键，
+      # 在解析阶段直接抛 ScannerException: mapping values are not allowed here，
+      # 导致整个应用起不来（提示词.txt 第705行的示例同样漏了引号，属规范自带的坑）。
+      key-prefix: "fitness:cache:"
+      use-key-prefix: true
+
+  # --- RabbitMQ（虚拟机） ---
+  rabbitmq:
+    host: ${RABBITMQ_HOST:192.168.199.128}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USERNAME:agent1}
+    password: ${RABBITMQ_PASSWORD:123456}
+    virtual-host: ${RABBITMQ_VHOST:/agent1}
+    connection-timeout: 5000ms
+    requested-heartbeat: 60s
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    listener:
+      simple:
+        acknowledge-mode: auto
+        prefetch: 1
+        retry:
+          enabled: true
+          initial-interval: 3000ms
+          max-attempts: 3
+
+# --- JWT ---
+# ⚠️ 生产环境务必通过环境变量 JWT_SECRET 覆盖此值，否则 Token 可被伪造
+jwt:
+  secret: ${JWT_SECRET:your-256-bit-secret-key-change-in-production!!}
+  expiration-days: 7
+
+# --- AI 服务配置（Python FastAPI） ---
+ai:
+  python:
+    base-url: ${AI_PYTHON_URL:http://localhost:8000}
+    connect-timeout: 3000ms
+    read-timeout: 30000ms
+  fallback:
+    summary: "AI 教练暂时走神了，请稍后再试 😅"
+    chat: "知识库暂时不可用，正在紧急恢复中 🛠️"
+
+# --- 回调签名 ---
+callback:
+  hmac-secret: ${HMAC_SECRET:shared-secret-key}
+
+# --- 周计划异步链路 ---
+fitness:
+  weekly-plan:
+    # 周计划MQ触发时间，规范要求每周日 21:00（与 20:00 的周统计任务错开）。
+    # 联调/答辩演示时可临时覆盖，不必等到周日，例如：
+    #   mvn spring-boot:run -Dspring-boot.run.arguments=--fitness.weekly-plan.cron="0/30 * * * * *"
+    cron: "0 0 21 * * SUN"
+  dlq-monitor:
+    # 死信队列深度检查：每 5 分钟一次，深度 >0 即打 ERROR 告警。
+    # 联调验证时可临时改成 "0/10 * * * * *"（每 10 秒）。
+    cron: "0 */5 * * * ?"
+
+# --- Knife4j API文档 ---
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+  api-docs:
+    path: /v3/api-docs
+
+knife4j:
+  enable: true
+  setting:
+    language: zh_cn
+
+# --- 日志 ---
+logging:
+  level:
+    com.fitness: DEBUG
+    org.springframework.amqp: INFO
+    org.hibernate.SQL: WARN

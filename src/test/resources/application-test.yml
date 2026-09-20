@@ -1,0 +1,53 @@
+# ==================== 测试专用配置 ====================
+# 用途：@DataJpaTest / @WebMvcTest / @SpringBootTest 统一使用
+# 原则（提示词测试策略）：测试不污染开发/生产数据库，统一使用 H2 内存库。
+
+spring:
+  datasource:
+    # MODE=MySQL 让 H2 兼容 MySQL 语法；DB_CLOSE_DELAY=-1 保证同一 JVM 内连接共享同一内存库
+    url: jdbc:h2:mem:fitness_test;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+
+  jpa:
+    hibernate:
+      ddl-auto: create-drop        # 由实体反向生成表结构，避免依赖 sql/init.sql 的 MySQL 专有语法
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: false
+        dialect: org.hibernate.dialect.H2Dialect
+    open-in-view: false
+
+  # Redis/RabbitMQ 在测试中不连接真实中间件（由 @MockBean 替换或不触发）
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      timeout: 500ms
+
+  cache:
+    type: none                     # 测试不启用 Spring Cache，避免无谓的 Redis 连接
+
+jwt:
+  secret: test-only-secret-key-at-least-32-bytes-long!!
+  expiration-days: 7
+
+ai:
+  python:
+    base-url: http://localhost:8000
+  fallback:
+    summary: "AI 教练暂时走神了，请稍后再试 😅"
+    chat: "知识库暂时不可用，正在紧急恢复中 🛠️"
+
+callback:
+  hmac-secret: test-hmac-secret
+
+# 测试期降噪：只保留 WARN 以上，业务日志已由断言覆盖
+logging:
+  level:
+    root: WARN
+    com.fitness: WARN
+    org.hibernate: WARN
+    org.springframework: WARN

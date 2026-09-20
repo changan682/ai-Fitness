@@ -1,0 +1,110 @@
+# ==================== docker-compose.yml ====================
+# 用途：本地运行 Milvus 向量数据库（含 etcd + MinIO 两个依赖）
+# MySQL / Redis / RabbitMQ 都在虚拟机 192.168.199.128 上，不在此编排
+#
+# 启动：docker compose up -d
+# 查看：docker compose ps
+# 日志：docker compose logs -f milvus
+# 停止：docker compose down          （保留数据卷）
+# 清库：docker compose down -v       （连同向量数据一起删除，下次启动会重新初始化知识库）
+#
+# ---------------------------------------------------------------
+# ⚠️ 本机实测：hub.docker.com / registry-1.docker.io 不可达（超时），
+#    因此 milvus 与 minio 这两个 Docker Hub 镜像**必须先配镜像加速器**才能拉取。
+#    etcd 用的是 quay.io，实测可达，无需加速。
+#
+#    配置方式（Docker Desktop）：
+#      Settings → Docker Engine，在 JSON 里加 registry-mirrors，例如：
+#        {
+#          "registry-mirrors": ["https://docker.m.daocloud.io"]
+#        }
+#      然后 Apply & Restart。
+#
+#    或者不改全局配置，只在 .env 里覆盖镜像地址（本文件已支持变量覆盖）：
+#        MILVUS_IMAGE=docker.m.daocloud.io/milvusdb/milvus:v2.6.0
+#        MINIO_IMAGE=docker.m.daocloud.io/minio/minio:RELEASE.2023-03-20T20-16-18Z
+# ---------------------------------------------------------------
+
+services:
+  # ---------- Milvus 依赖 1：etcd（存元数据）----------
+  etcd:
+    # quay.io 实测可达，不需要镜像加速
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: fitness-etcd
+    networks: [fitness-net]
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+    volumes:
+      - etcd_data:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # ---------- Milvus 依赖 2：MinIO（存向量数据，S3 兼容）----------
+  minio:
+    image: ${MINIO_IMAGE:-minio/minio:RELEASE.2023-03-20T20-16-18Z}
+    container_name: fitness-minio
+    networks: [fitness-net]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - minio_data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      # 注意：RELEASE.2023-03-20 这个镜像里**没有 curl**，只有 mc/mcli，
+      # 用 curl 作为健康检查会永远 unhealthy（规范示例里的写法有这个问题）。
+      # 这里改用 MinIO 自带的 mc 做存活探测。
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # ---------- Milvus 单机版 ----------
+  milvus:
+    # ⚠️ 版本选择说明：
+    #   规范示例给的是 v2.3.4（2023 年），但本项目环境装的是 pymilvus 2.6.x，
+    #   客户端用 MilvusClient 门面（2.4+ 才有），跨 3 个小版本容易协议不兼容。
+    #   因此这里选与客户端同代的 2.6.x。**要求服务端 ≥ 2.4**，不要退回 2.3.x。
+    image: ${MILVUS_IMAGE:-milvusdb/milvus:v2.6.0}
+    container_name: fitness-milvus
+    networks: [fitness-net]
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    ports:
+      - "19530:19530"   # gRPC / SDK 端口（pymilvus 连这个）
+      - "9091:9091"     # 健康检查与指标端口
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - milvus_data:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    command: milvus run standalone
+
+volumes:
+  etcd_data:
+  minio_data:
+  milvus_data:
+
+networks:
+  fitness-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

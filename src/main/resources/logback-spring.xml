@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Logback 配置 — 提示词第十章「日志与链路追踪策略」
+
+  - 开发环境（dev/docker）：彩色文本格式，便于本地排查
+  - 生产环境（prod）：JSON 格式，含 traceId / userId，便于日志采集与检索
+  - 所有格式均输出 traceId / userId，由 TraceFilter 与 JwtInterceptor 写入 MDC
+
+  注意：application.yml 中的 logging.level.* 会在本文件加载后由 Spring Boot 覆盖生效，
+  因此本文件只负责「输出格式」，级别仍集中在 application.yml 管理。
+-->
+<configuration>
+
+    <!-- 从 application.yml 读取服务名，写入 JSON 日志的 service 字段 -->
+    <springProperty scope="context" name="APP_NAME"
+                    source="spring.application.name" defaultValue="java-bff"/>
+
+    <!-- ==================== 开发环境：彩色文本 ==================== -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %highlight(%-5level) [%thread] [traceId=%X{traceId:-}] [userId=%X{userId:-}] %cyan(%logger{36}) - %msg%n</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <!-- ==================== 生产环境：JSON 结构化日志 ==================== -->
+    <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <!-- 只输出需要的 MDC 字段，避免把无关上下文全部打进日志 -->
+            <includeMdcKeyName>traceId</includeMdcKeyName>
+            <includeMdcKeyName>userId</includeMdcKeyName>
+            <customFields>{"service":"${APP_NAME}"}</customFields>
+            <timeZone>Asia/Shanghai</timeZone>
+        </encoder>
+    </appender>
+
+    <springProfile name="prod">
+        <root level="INFO">
+            <appender-ref ref="JSON"/>
+        </root>
+        <logger name="com.fitness" level="INFO"/>
+    </springProfile>
+
+    <springProfile name="dev,docker,default">
+        <root level="INFO">
+            <appender-ref ref="CONSOLE"/>
+        </root>
+    </springProfile>
+
+</configuration>

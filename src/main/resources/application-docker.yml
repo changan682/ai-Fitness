@@ -1,0 +1,25 @@
+# ==================== Docker 环境配置 ====================
+# 启动方式: SPRING_PROFILES_ACTIVE=docker mvn spring-boot:run
+# 适用场景: 协作者 clone 项目后，中间件全部通过 docker-compose 在本地启动
+
+spring:
+  datasource:
+    # characterEncoding 用 Java 字符集名 UTF-8（写 utf8mb4 会导致连接池初始化即失败）；
+    # allowPublicKeyRetrieval=true 用于 MySQL 8 caching_sha2_password 在非 TLS 连接下取公钥。
+    url: jdbc:mysql://localhost:3306/fitness_db?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&createDatabaseIfNotExist=true
+    username: root
+    password: 123456
+
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      # 与 dev 一致：密码只从环境变量取
+      password: ${REDIS_PASSWORD:}
+
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: guest
+    password: guest
+    virtual-host: /

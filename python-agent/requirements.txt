@@ -1,0 +1,57 @@
+# ==================== 第 4 周（骨架 + Mock）====================
+# 基础依赖：只装这些就能把服务跑起来。
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.27
+pydantic>=2.6,<3.0
+pydantic-settings>=2.2,<3.0
+httpx>=0.27
+python-dotenv>=1.0
+
+# ==================== 第 5 周（Milvus + 真实 Embedding/LLM）====================
+# pymilvus 版本要求 >= 2.4：代码用的是 MilvusClient 门面（2.4 才引入），
+# 因此 **Milvus 服务端也必须 >= 2.4**（docker-compose 里用的是 2.6.x）。
+# 规范示例给的 milvusdb/milvus:v2.3.4 与 2.6 客户端跨了 3 个小版本，会不兼容。
+pymilvus>=2.4
+
+# 说明：
+# - DeepSeek 与阿里云百炼都走 **OpenAI 兼容的 HTTP 接口**，
+#   代码里用 httpx 直接发请求（见 app/llm.py 与 app/embedding.py），
+#   因此**不需要** openai SDK，少一个依赖。
+# - 本地 Embedding 方案（EMBEDDING_PROVIDER=local）才需要下面这个重量级依赖
+#   （会一并安装 torch，数 GB）。默认走云端 or 离线兜底，所以不在此默认安装：
+# sentence-transformers>=2.7
+
+# ==================== 第 7 周（RabbitMQ 消费者 + 重试计数）====================
+# pika：MQ 消费（app/mq_consumer.py）。用 pika 1.x 的 BlockingConnection +
+#       basic_consume(auto_ack=False) + basic_qos(prefetch_count=1) 手动确认。
+pika>=1.3,<2.0
+# redis：同一 taskId 的**重试次数**计数（mq:retry:{taskId}，TTL 3600s）。
+#        刻意不用 RabbitMQ 的 x-death / redelivered 当计数：requeue 重投时它们不递增，
+#        会导致失败消息无限重投。
+redis>=5.0
+
+# ⚠️ 上面两个依赖在 app/mq_consumer.py 里是**惰性导入**的：
+#    没装它们时 FastAPI 主服务与 pytest 完全不受影响，
+#    只有真正启动消费者（python -m app.mq_consumer）时才报错并提示安装命令。
+
+# ==================== 测试与验收脚本（克隆仓库后建议一起装）====================
+# 这两个不在"服务运行时"的必需路径上，但**不装就跑不了仓库里的测试与验收脚本**，
+# 属于"clone 下来看起来完整、实际跑不起来"的常见坑，因此显式列出。
+#
+# pytest：tests/ 下 385 项单测（python-agent 目录下执行 `python -m pytest tests -q`）
+pytest>=7.0
+# pillow：scripts/verify_pose_multimodal.py 生成"深蹲剪影"合成图用；
+#         脚本里是惰性导入，没装时会提示改用 --image 传自己的照片，不会报错中断
+pillow>=10.0
+
+# ==================== 以下包不需要声明，说明避免误解 ====================
+# - starlette：fastapi 的传递依赖，随 fastapi 自动安装，不要单独声明（版本必须匹配）
+# - python-multipart：仅当用 Form/File 接收 multipart 时才需要。
+#   本项目的姿态评估走「Java 压缩后转 Base64 → JSON」，Python 侧不解析 multipart，故不需要。
+# - uvicorn[standard]：已包含 httptools / uvloop / watchfiles 等，无需另装。
+#
+# ==================== 可选：本地 Embedding（默认不装）====================
+# 规范把"本地 Embedding"列为首选方案，但会一并安装 torch（数 GB）。
+# 默认走云端百炼 text-embedding-v3，或离线 hashing 兜底，因此默认不装。
+# 需要时：EMBEDDING_PROVIDER=local + 下面这一行，并 FORCE_RELOAD_KNOWLEDGE=true 重建知识库。
+# sentence-transformers>=2.7
