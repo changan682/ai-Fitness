@@ -82,8 +82,6 @@ import static org.mockito.Mockito.when;
 @SpringBootTest(properties = {
         // 与 Repository 测试用不同的内存库名，避免两个上下文互相重建成表
         "spring.datasource.url=jdbc:h2:mem:fitness_it;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE",
-        // 测试专用方言：绕过主代码「Double + @Column(scale=1)」（见报告「发现的主代码问题」）
-        "spring.jpa.properties.hibernate.dialect=com.fitness.testsupport.LenientH2Dialect",
         // RedisTemplate 被 mock 替换后 getConnectionFactory() 为 null，而 Redis Repository 支持
         // （@RedisHash）本项目并未使用，故在测试中排除该自动配置，避免无关的适配器创建失败
         "spring.autoconfigure.exclude=org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration"

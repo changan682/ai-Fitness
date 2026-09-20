@@ -46,8 +46,15 @@ public class DietRecord {
     @Column(nullable = false, length = 100)
     private String foodName;
 
-    /** 重量(克) */
-    @Column(nullable = false)
+    /**
+     * 重量(克)
+     * <p>
+     * ⚠️ <b>必须显式写 name</b>：隐式物理名推导只处理「小写→大写→小写」的边界，
+     * 且**从不检查最后一个字符**，因此 {@code weightG} 会被推导成 {@code weightg}，
+     * 而 {@code sql/init.sql} 里是 {@code weight_g}。
+     * {@code ddl-auto: none} 下 Hibernate 不校验，不一致只在运行期暴露为 MySQL 1054。
+     */
+    @Column(name = "weight_g", nullable = false)
     private Integer weightG;
 
     /** 热量(kcal) */

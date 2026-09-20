@@ -11,7 +11,6 @@ import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.test.context.ActiveProfiles;
-import org.springframework.test.context.TestPropertySource;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -31,12 +30,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @ActiveProfiles("test")
-// 测试专用方言：绕过主代码「Double + @Column(scale=1)」导致的元数据构建异常（见报告「发现的主代码问题」）。
 // 注意：原先这里还要挂 H2MySqlStatementInspector + h2-mysql-compat.sql 去给 MySQL 原生递归 CTE 打补丁；
 // 「连续训练天数」改为「JPQL 取日期 + Java 算逻辑」后已是可移植写法，H2 直接能跑，那套补丁已删除。
-@TestPropertySource(properties = {
-        "spring.jpa.properties.hibernate.dialect=com.fitness.testsupport.LenientH2Dialect"
-})
 @DisplayName("Repository 测试：TrainingRecordRepository + BodyMetricRepository")
 class TrainingAndBodyMetricRepositoryTest {
 

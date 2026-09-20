@@ -9,7 +9,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.test.context.ActiveProfiles;
-import org.springframework.test.context.TestPropertySource;
 
 import java.math.BigDecimal;
 import java.util.List;
@@ -35,8 +34,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @ActiveProfiles("test")
-// 测试专用方言：绕过主代码「Double + @Column(scale=1)」导致的元数据构建异常（见报告「发现的主代码问题」）
-@TestPropertySource(properties = "spring.jpa.properties.hibernate.dialect=com.fitness.testsupport.LenientH2Dialect")
 @DisplayName("Repository 测试：UserRepository + FoodLibraryRepository")
 class UserAndFoodRepositoryTest {
 
