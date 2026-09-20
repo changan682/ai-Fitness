@@ -1,12 +1,20 @@
 # ==================== docker-compose.yml ====================
-# 用途：本地运行 Milvus 向量数据库（含 etcd + MinIO 两个依赖）
-# MySQL / Redis / RabbitMQ 都在虚拟机 192.168.199.128 上，不在此编排
+#
+# 默认（不加 profile）只启动 **Milvus 及其依赖**（etcd + MinIO）——
+# 这是本项目日常开发/答辩的用法：MySQL / Redis / RabbitMQ 在虚拟机
+# 192.168.199.128 上，Java 与 Python 在 IDE 里跑，方便打断点调试。
+#
+# 另外提供两组可选 profile，供「协作者 clone 后没有那台虚拟机」的场景：
+#   docker compose --profile local-mw up -d     # 本地 MySQL/Redis/RabbitMQ
+#   docker compose --profile apps    up -d      # 把 Java/Python 也容器化
+# 两者可叠加：docker compose --profile local-mw --profile apps up -d
+# 用 profile 而不是直接加服务，是为了**不改动**上面那套默认工作流。
 #
 # 启动：docker compose up -d
 # 查看：docker compose ps
 # 日志：docker compose logs -f milvus
 # 停止：docker compose down          （保留数据卷）
-# 清库：docker compose down -v       （连同向量数据一起删除，下次启动会重新初始化知识库）
+# 清库：docker compose down -v       （连同向量/数据库数据一起删）
 #
 # ---------------------------------------------------------------
 # ⚠️ 本机实测：hub.docker.com / registry-1.docker.io 不可达（超时），
@@ -97,10 +105,153 @@ services:
       start_period: 60s
     command: milvus run standalone
 
+  # ================================================================
+  # 可选：本地中间件（profile=local-mw）
+  # 供没有那台虚拟机的人使用；启用后把 Java 侧 .env 的
+  # MYSQL_HOST / REDIS_HOST / RABBITMQ_HOST 改成 localhost（或容器名）即可。
+  # ================================================================
+
+  mysql:
+    profiles: ["local-mw"]
+    image: ${MYSQL_IMAGE:-mysql:8.0}
+    container_name: fitness-mysql
+    networks: [fitness-net]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-change-me}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-fitness_db}
+      TZ: Asia/Shanghai
+    # 字符集/排序规则/时区必须显式指定：MySQL 8 默认时区是 UTC，
+    # 不设 default-time-zone 会让 DATETIME 与 application.yml 的 Asia/Shanghai 差 8 小时。
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      # 首次初始化数据卷时自动执行建表脚本，等价于 README 里的手工 `mysql < sql/init.sql`
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  redis:
+    profiles: ["local-mw"]
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    container_name: fitness-redis
+    networks: [fitness-net]
+    # 必须开 requirepass：Java 侧 RedisCacheService / 分布式锁 / Token 黑名单
+    # 都按「有密码」配置（application.yml 的 password 占位符），空密码连不上会直接 NOAUTH。
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-change-me}", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-change-me}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    profiles: ["local-mw"]
+    image: ${RABBITMQ_IMAGE:-rabbitmq:3.13-management}
+    container_name: fitness-rabbitmq
+    networks: [fitness-net]
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME:-agent1}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-change-me}
+      # vhost 是独立于账号的一层命名空间：Java 与 Python 两侧默认都是 /agent1
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/agent1}
+    ports:
+      - "5672:5672"     # AMQP
+      - "15672:15672"   # 管理后台（死信队列排查用）
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  # ================================================================
+  # 可选：把 Java / Python 也容器化（profile=apps）
+  # 需要先各自构建：`mvn -DskipTests package`（Java）、无需预处理（Python 在镜像内装依赖）
+  # ================================================================
+
+  python-agent:
+    profiles: ["apps"]
+    build:
+      context: ./python-agent
+    container_name: fitness-python
+    networks: [fitness-net]
+    depends_on:
+      milvus:
+        condition: service_healthy
+    environment:
+      # 容器内用服务名互相寻址（不是 localhost）
+      MILVUS_HOST: milvus
+      MILVUS_PORT: 19530
+      # 回调 Java 走容器网络的服务名
+      JAVA_CALLBACK_URL: http://java-bff:8080
+      # 密钥全部由宿主机环境注入，镜像里不留任何真实值
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY:-}
+      HMAC_SECRET: ${HMAC_SECRET:-change-me-hmac-shared-secret}
+      # 中间件：默认仍指向虚拟机；用 local-mw 时改成本地服务名
+      REDIS_HOST: ${REDIS_HOST:-192.168.199.128}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      RABBITMQ_HOST: ${RABBITMQ_HOST:-192.168.199.128}
+      RABBITMQ_PORT: ${RABBITMQ_PORT:-5672}
+      RABBITMQ_USER: ${RABBITMQ_USERNAME:-agent1}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-}
+      RABBITMQ_VHOST: ${RABBITMQ_VHOST:-/agent1}
+    ports:
+      - "8000:8000"
+
+  java-bff:
+    profiles: ["apps"]
+    build:
+      context: .
+    container_name: fitness-java
+    networks: [fitness-net]
+    depends_on:
+      python-agent:
+        condition: service_started
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      MYSQL_HOST: ${MYSQL_HOST:-192.168.199.128}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-fitness_db}
+      MYSQL_USERNAME: ${MYSQL_USERNAME:-root}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-change-me}
+      REDIS_HOST: ${REDIS_HOST:-192.168.199.128}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      RABBITMQ_HOST: ${RABBITMQ_HOST:-192.168.199.128}
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-agent1}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-}
+      RABBITMQ_VHOST: ${RABBITMQ_VHOST:-/agent1}
+      # Java 调 Python：容器内用服务名
+      AI_PYTHON_URL: http://python-agent:8000
+      JWT_SECRET: ${JWT_SECRET:-change-me-to-a-random-32-bytes-or-longer}
+      HMAC_SECRET: ${HMAC_SECRET:-change-me-hmac-shared-secret}
+    ports:
+      - "8080:8080"
+
 volumes:
   etcd_data:
   minio_data:
   milvus_data:
+  # 本地中间件的数据卷（不启用 local-mw 时不会创建）
+  mysql_data:
+  redis_data:
+  rabbitmq_data:
 
 networks:
   fitness-net:

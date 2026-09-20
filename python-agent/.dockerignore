@@ -1,0 +1,17 @@
+# 绝不把真实密钥打进镜像：.env 里是 DASHSCOPE/DEEPSEEK Key 与 HMAC 密钥
+.env
+.env.*
+
+# Python 缓存与测试（运行期用不到，且体积大）
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+tests/
+
+# 虚拟环境
+.venv/
+venv/
+
+# 本机运行状态：记录当前向量是用哪个 Embedding 建的，属于「本机 Milvus 状态」而非代码
+data/.kb_manifest.json

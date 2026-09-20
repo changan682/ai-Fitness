@@ -1,0 +1,23 @@
+# 构建上下文瘦身：Java 镜像只需要那一个 jar
+target/*
+!target/fitness-server-1.0.0.jar
+
+# 其它模块与本地状态都与本镜像无关
+fitness-frontend/
+python-agent/
+.git/
+.github/
+.idea/
+.vscode/
+
+# 真实密钥绝不进镜像（.env 里是数据库/Redis/MQ 口令与 JWT/HMAC 密钥）
+.env
+.env.*
+
+*.log
+*.md
+
+# 个人学位材料（含学号姓名）
+提示词.txt
+*.docx
+*.doc
