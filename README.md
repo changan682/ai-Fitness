@@ -246,8 +246,8 @@ mvn test
 # Python：392 项（不联网）
 cd python-agent; E:\Anaconde\python.exe -m pytest tests -q
 
-# 前端：严格模式类型检查 + 生产构建
-cd fitness-frontend; npm run typecheck; npm run build
+# 前端：严格模式类型检查 + 单元/渲染测试 + 生产构建
+cd fitness-frontend; npm run typecheck; npm test; npm run build
 ```
 
 **端到端验收脚本**（需对应服务在线）：

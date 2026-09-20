@@ -39,6 +39,7 @@ Vite 只做代理，不会替你启动后端。
 
 ```powershell
 npm run typecheck    # tsc --noEmit（严格模式）
+npm test             # vitest run：页面渲染冒烟 + 拦截器逻辑（21 项，不依赖后端）
 npm run build        # 先 tsc 再 vite build，产物在 dist/
 npm run preview      # 预览构建产物（4173）
 ```
@@ -69,6 +70,10 @@ src/
 │   ├── dashboard/            # DateHeader / StatsCards / QuickRecordForm / TodayRecordsTable
 │   └── ai/                   # SummaryTab / RecommendTab / PoseTab / ChatTab
 ├── pages/                    # LoginPage / DashboardPage / AIAssistantPage / TrendsPage / ProfilePage
+│   ├── pages.render.test.tsx # 页面渲染冒烟 + 路由守卫 + 错误边界（9 项）
+├── api/
+│   └── client.test.ts        # 拦截器错误码分流 / 网络错误 / 9001 去抖（12 项）
+├── test/setup.ts             # jsdom 补齐 matchMedia / ResizeObserver / scrollIntoView
 ├── utils/                    # bridge（React↔非React 桥） / tokenStorage
 ├── App.tsx                   # RouterProvider
 └── main.tsx                  # ConfigProvider + AntdApp + QueryClientProvider + 启动恢复登录态
@@ -156,10 +161,34 @@ Profile 页面把这两件事拆成两个互不影响的表单。
 
 ---
 
-## 6. 已知限制
+## 6. 测试
+
+```powershell
+npm test        # vitest run（jsdom，不依赖后端，可进 CI）
+```
+
+两层，共 **21 项**：
+
+| 层 | 文件 | 覆盖 |
+|:---|:---|:---|
+| **页面渲染冒烟** | `src/pages/pages.render.test.tsx` | 5 个页面 + 404 在 jsdom 里真实挂载并渲染出关键内容；`ErrorBoundary` 兜住渲染期异常（不是白屏）；`ProtectedRoute` 在已登录/未登录两种状态下分别放行与重定向 |
+| **拦截器逻辑** | `src/api/client.test.ts` | 信封拆解；错误码分级（9001 清态跳登录并**去抖**、9002/9003 与未知码的提示方式、1002/6001 **静默**）；断网/超时/5xx 三种网络错误的文案 |
+
+**为什么必须有渲染冒烟测试**：`tsc` 只证明类型对、`vite build` 只证明模块能打包，
+两者都抓不到**首帧运行时错误**（Hook 用错位置、`App.useApp()` 取不到 Context、
+解构了 `undefined` 的响应……）。这类问题在浏览器里是整页白屏，而构建是绿的。
+
+接口在测试里全部打桩，因此**不需要起后端**；ECharts 被替换成空组件
+（它依赖 canvas，jsdom 没有），图表本身由生产构建与人工浏览验证。
+
+---
+
+## 7. 已知限制
 
 - 对话历史只存在组件 `useState` 中，离开 AI 页面即清空（规范的安全要求，不是缺陷）。
 - 趋势页的「每周容量」按周逐个调用 `/v1/stats/weekly`（后端没有多周聚合接口），
   区间上限约 13 周，避免一次打出几十个请求。
-- 未做单元测试与 E2E（规范对前端只要求「页面跑通全流程」），
-  质量由 `tsc` 严格模式 + 生产构建 + 对真实后端的联调冒烟覆盖。
+- **图表未做断言、交互未做 E2E**：渲染冒烟只验证「页面能挂载并输出内容」，
+  不验证图表画出来的样子与点击交互；真正的端到端点击流建议人工过一遍
+  （`npm run dev` + 已启动的 Java/Python）。
+- 未做视觉回归（截图对比）。
