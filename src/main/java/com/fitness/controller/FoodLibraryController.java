@@ -42,10 +42,18 @@ public class FoodLibraryController {
         return Result.ok(foodLibraryService.getAllCategories());
     }
 
-    /** 重新加载食物库缓存 */
+    /**
+     * 重新加载食物库缓存
+     * <p>
+     * 返回实际加载的条数：重建失败时 Service 会抛 9999，不会返回一个「成功」的假象。
+     * 前端可据此确认缓存确实装进去了（例如 30 种食物）。
+     */
     @PostMapping("/reload-cache")
-    public Result<?> reloadCache() {
-        foodLibraryService.reloadCache();
-        return Result.ok();
+    public Result<Map<String, Object>> reloadCache() {
+        int loaded = foodLibraryService.reloadCache();
+
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("loaded", loaded);
+        return Result.ok("食物库缓存已重建", data);
     }
 }

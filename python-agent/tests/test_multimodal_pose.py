@@ -25,7 +25,12 @@ import pytest
 
 from app import agent
 from app import multimodal
-from app.multimodal import MultimodalError, QwenVLClient, sniff_image_mime
+from app.multimodal import (
+    MultimodalError,
+    MultimodalInputError,
+    QwenVLClient,
+    sniff_image_mime,
+)
 from app.utils import AgentInputError, extract_json_object
 
 def _make_png(size: int = 64, rgb=(220, 30, 30)) -> bytes:
@@ -301,3 +306,88 @@ class TestClientBehaviour:
 
         with pytest.raises(MultimodalError):
             QwenVLClient._extract_content(_Resp())
+
+
+# ============================================================
+# 5. 「输入被模型拒绝」不能和服务不可用混为一谈（HTTP 400/422 vs 401/403）
+# ============================================================
+
+class TestInputRejectionClassification:
+    """模型**拒绝这张图**（400/422）必须与服务**不可用**（401/403/5xx）区分开。
+
+    实测背景：图片宽或高 ≤ 10px 时百炼返回
+
+        <400> InternalError.Algo.InvalidParameter:
+        The image length and width do not meet the model restrictions.
+        [height:1 or width:1 must be larger than 10]
+
+    这条 400 原先一律被当作 ``MultimodalError`` → HTTP 500 → Java 6002
+    「姿态评估服务暂时不可用，请稍后再试」。但它是**入参问题**：用户该做的是换一张照片，
+    而不是拿着同一张过小的图反复重试（规范第十一章第 7 条要避免的正是这种误导）。
+    """
+
+    @staticmethod
+    def _client_that_returns(monkeypatch, status_code: int, text: str) -> QwenVLClient:
+        """把 httpx.post 换成返回指定状态码的假响应。"""
+        import httpx
+
+        class _Resp:
+            def __init__(self) -> None:
+                self.status_code = status_code
+                self.text = text
+
+            @staticmethod
+            def json():
+                return {}
+
+        monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp())
+        return QwenVLClient(
+            api_key="sk-test",
+            base_url="https://example.invalid/compatible-mode/v1",
+            max_retries=0,          # 不重试，让 400 立刻抛出
+        )
+
+    @pytest.mark.parametrize("status", [400, 422])
+    def test_input_rejection_raises_input_error(self, monkeypatch, status):
+        client = self._client_that_returns(
+            monkeypatch, status, "InvalidParameter: image too small")
+
+        with pytest.raises(MultimodalInputError) as exc:
+            client.describe_image(IMAGE_B64, "看看这个动作", image_bytes=PNG_64)
+
+        # 必须仍是 MultimodalError 的子类：既有 except MultimodalError 的调用方行为不变
+        assert isinstance(exc.value, MultimodalError)
+        assert str(status) in str(exc.value)
+
+    @pytest.mark.parametrize("status", [401, 403, 404])
+    def test_service_side_rejection_is_not_an_input_error(self, monkeypatch, status):
+        client = self._client_that_returns(monkeypatch, status, "access_denied")
+
+        with pytest.raises(MultimodalError) as exc:
+            client.describe_image(IMAGE_B64, "看看这个动作", image_bytes=PNG_64)
+
+        assert not isinstance(exc.value, MultimodalInputError), (
+            "401/403 是 Key 无效或模型未开通，属服务侧配置问题；"
+            "报成入参问题会让用户白换照片，而真正该查的是 Key 与开通状态"
+        )
+
+    def test_agent_turns_input_rejection_into_agent_input_error(self, stub):
+        """入参被拒 → agent 抛 AgentInputError（HTTP 400 → Java 9003），而不是 500。"""
+        stub["client"]._error = MultimodalInputError(
+            "多模态模型拒绝该输入 HTTP 400: image too small")
+
+        with pytest.raises(AgentInputError) as exc:
+            agent.evaluate_pose(IMAGE_B64, "深蹲")
+
+        assert "照片" in str(exc.value), "提示必须引导用户换一张照片，而不是说服务不可用"
+
+    def test_agent_keeps_service_failure_as_multimodal_error(self, stub):
+        """服务侧故障仍走 MultimodalError（HTTP 500 → Java 6002 兜底文案），不被改判。"""
+        stub["client"]._error = MultimodalError("HTTP 403: access_denied")
+
+        with pytest.raises(MultimodalError) as exc:
+            agent.evaluate_pose(IMAGE_B64, "深蹲")
+
+        assert not isinstance(exc.value, AgentInputError), (
+            "服务不可用不该被伪装成「你的照片有问题」"
+        )

@@ -3,6 +3,8 @@ package com.fitness.service;
 import com.fitness.cache.CacheKeys;
 import com.fitness.cache.RedisCacheService;
 import com.fitness.entity.FoodLibrary;
+import com.fitness.exception.BusinessException;
+import com.fitness.exception.ErrorCode;
 import com.fitness.repository.FoodLibraryRepository;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
@@ -39,25 +41,43 @@ public class FoodLibraryService {
      * <p>
      * 预热失败不阻断启动：数据库/Redis 暂时不可用时，接口仍可在首次访问时回源，
      * 避免「中间件抖动导致整个应用起不来」。
+     * <p>
+     * ⚠️ 这份「宽容」<b>只适用于启动路径</b>。管理员显式调用重建缓存时必须如实报错，
+     * 因此 {@link #reloadCache()} 走的是会抛异常的 {@link #loadFoodsIntoCache()}，
+     * 而不是复用本方法 —— 否则接口会返回 success 而实际一条都没加载：
+     * 食物库表列名与 DDL 不一致时（曾发生：实体的 {@code calories_per100g}
+     * vs DDL 的 {@code calories_per_100g}），启动日志只有一条 WARN，
+     * 而 {@code POST /reload-cache} 仍然报成功，故障被彻底掩盖。
      */
     @PostConstruct
     public void warmUpCache() {
         try {
-            List<FoodLibrary> allFoods = foodLibraryRepository.findAll();
-            if (allFoods.isEmpty()) {
-                log.warn("食物库为空，跳过缓存预热（请先执行 sql/init.sql 初始化数据）");
-                return;
-            }
-            Map<String, String> foodMap = new LinkedHashMap<>();
-            for (FoodLibrary f : allFoods) {
-                foodMap.put(f.getFoodName(), f.getCaloriesPer100g().toPlainString());
-            }
-            redisCacheService.hSetAll(CacheKeys.FOOD_LIBRARY_ALL, foodMap);
-            redisCacheService.expireWithJitter(CacheKeys.FOOD_LIBRARY_ALL, CacheKeys.FOOD_LIBRARY_TTL_SECONDS);
-            log.info("食物库缓存预热完成: {} 种食物已加载到Redis", allFoods.size());
+            loadFoodsIntoCache();
         } catch (Exception e) {
             log.warn("食物库缓存预热失败（首次查询将回源MySQL）: {}", e.getMessage());
         }
+    }
+
+    /**
+     * 把食物库真正读进 Redis
+     *
+     * @return 成功加载的食物条数
+     * @throws RuntimeException 查询数据库失败（表结构/连接问题）时原样抛出，由调用方决定怎么处理
+     */
+    private int loadFoodsIntoCache() {
+        List<FoodLibrary> allFoods = foodLibraryRepository.findAll();
+        if (allFoods.isEmpty()) {
+            log.warn("食物库为空，跳过缓存预热（请先执行 sql/init.sql 初始化数据）");
+            return 0;
+        }
+        Map<String, String> foodMap = new LinkedHashMap<>();
+        for (FoodLibrary f : allFoods) {
+            foodMap.put(f.getFoodName(), f.getCaloriesPer100g().toPlainString());
+        }
+        redisCacheService.hSetAll(CacheKeys.FOOD_LIBRARY_ALL, foodMap);
+        redisCacheService.expireWithJitter(CacheKeys.FOOD_LIBRARY_ALL, CacheKeys.FOOD_LIBRARY_TTL_SECONDS);
+        log.info("食物库缓存预热完成: {} 种食物已加载到Redis", allFoods.size());
+        return allFoods.size();
     }
 
     /**
@@ -129,9 +149,24 @@ public class FoodLibraryService {
                 .toList();
     }
 
-    /** 重新加载缓存 */
-    public void reloadCache() {
+    /**
+     * 重新加载缓存（管理员显式触发的接口）
+     * <p>
+     * 与启动预热<b>刻意不同</b>：这里必须如实抛出异常。调用方是主动要求重建缓存的人，
+     * 若查询食物库失败（例如列名与 {@code sql/init.sql} 不一致）却返回 success，
+     * 会把一个「食物库/饮食模块全挂」的故障伪装成「缓存已刷新」。
+     *
+     * @return 成功加载的食物条数（前端可直接看到实际加载了多少）
+     * @throws BusinessException 查询失败时抛 9999，并在 msg 里点明要检查什么
+     */
+    public int reloadCache() {
         redisCacheService.delete(CacheKeys.FOOD_LIBRARY_ALL);
-        warmUpCache();
+        try {
+            return loadFoodsIntoCache();
+        } catch (Exception e) {
+            log.error("食物库缓存重建失败: {}", e.getMessage(), e);
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR,
+                    "食物库缓存重建失败：查询食物库出错，请检查数据库连接以及表结构是否与 sql/init.sql 一致");
+        }
     }
 }

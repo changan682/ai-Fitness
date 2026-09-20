@@ -42,6 +42,11 @@ Java 侧压缩后的图（最长边 ≤1024px）不受影响。
 :class:`MultimodalError`，由调用方决定是降级还是如实报错 ——
 姿态评估按规范第十一章第 7 条**如实报错**（Java 返回兜底文案），
 而不是编一个看起来正常的分数。
+
+其中「模型拒绝这次输入」（HTTP 400/422，例如图片宽高 ≤ 10px）抛
+:class:`MultimodalInputError`（``MultimodalError`` 的子类）：
+这是**入参问题**，调用方应按 HTTP 400 → Java 9003 回报，让用户换一张照片，
+而不是伪装成「服务暂时不可用」让用户拿着同一张图反复重试。
 """
 
 from __future__ import annotations
@@ -60,6 +65,23 @@ logger = logging.getLogger(__name__)
 
 class MultimodalError(RuntimeError):
     """多模态调用失败（未配置 Key、网络异常、限流、响应结构异常）。"""
+
+
+class MultimodalInputError(MultimodalError):
+    """模型**拒绝了这次输入**（HTTP 400/422），而不是服务本身不可用。
+
+    继承 :class:`MultimodalError` 以保持既有 ``except MultimodalError`` 的兼容，
+    同时让调用方能区分两种语义完全不同的失败：
+
+    - **入参问题**（图片尺寸/格式不合法）→ 应回 9003，引导用户换一张照片；
+    - **服务问题**（Key 未开通 403、限流 429、5xx）→ 应回 6002 兜底文案。
+
+    两者若混为一谈，用户上传一张过小的图会看到「姿态评估服务暂时不可用，请稍后再试」，
+    于是拿着同一张图反复重试 —— 这正是规范里要避免的那种误导。
+
+    实测触发场景：图片宽或高 ≤ 10px 时模型返回
+    ``InvalidParameter: The image length and width do not meet the model restrictions``。
+    """
 
 
 def sniff_image_mime(raw: bytes) -> str:
@@ -184,13 +206,27 @@ class QwenVLClient:
             elapsed_ms = (time.monotonic() - started) * 1000
             if response.status_code != 200:
                 detail = response.text[:300]
-                last_error = MultimodalError(f"HTTP {response.status_code}: {detail}")
-                # 429（限流）与 5xx 值得重试；其余 4xx（鉴权/参数/未开通）重试无意义
+                # 429（限流）与 5xx 值得重试
                 if response.status_code == 429 or response.status_code >= 500:
+                    last_error = MultimodalError(f"HTTP {response.status_code}: {detail}")
                     logger.warning("多模态返回 %d（第%d次），将重试: %s",
                                    response.status_code, attempt + 1, detail)
                     self._sleep_before_retry(attempt)
                     continue
+
+                # ---- 非重试类 4xx：必须区分「输入被拒」与「服务/配置问题」----
+                if response.status_code in (400, 422):
+                    # 模型明确拒绝这次输入（图片尺寸/格式不合法）→ 入参问题，重试无意义。
+                    logger.warning("多模态拒绝该输入 HTTP %d: %s",
+                                   response.status_code, detail)
+                    raise MultimodalInputError(
+                        f"多模态模型拒绝该输入 HTTP {response.status_code}: {detail}"
+                    )
+
+                # 401/403（Key 无效、模型未开通）等属于服务侧配置问题：
+                # 同样不重试，但**绝不能**报成入参问题 —— 否则会误导用户去换照片，
+                # 而真正该做的是检查 Key 与模型开通状态。
+                logger.error("多模态调用被拒绝 HTTP %d: %s", response.status_code, detail)
                 raise MultimodalError(
                     f"多模态调用失败 HTTP {response.status_code}: {detail}"
                 )

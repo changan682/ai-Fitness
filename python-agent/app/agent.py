@@ -1426,21 +1426,31 @@ def _evaluate_pose_multimodal(
     ``score_level`` 一律由 ``score`` 本地派生（不采信模型自报的等级）：
     「分数与等级自洽」这条不变量由代码保证，而不是指望模型每次算对。
     """
-    from .multimodal import MultimodalError, get_multimodal
+    from .multimodal import MultimodalError, MultimodalInputError, get_multimodal
 
     client = get_multimodal()
     if not client.configured:
         raise MultimodalError("未配置 DASHSCOPE_API_KEY，无法调用多模态模型做姿态评估")
 
     started = time.monotonic()
-    text = client.describe_image(
-        image_base64,
-        POSE_VL_USER_PROMPT.format(action=action),
-        system_prompt=POSE_VL_SYSTEM_PROMPT.format(action=action),
-        image_bytes=image_bytes,
-        temperature=0.2,        # 姿态评估要的是稳定结论，不是创造力
-        max_tokens=800,
-    )
+    try:
+        text = client.describe_image(
+            image_base64,
+            POSE_VL_USER_PROMPT.format(action=action),
+            system_prompt=POSE_VL_SYSTEM_PROMPT.format(action=action),
+            image_bytes=image_bytes,
+            temperature=0.2,        # 姿态评估要的是稳定结论，不是创造力
+            max_tokens=800,
+        )
+    except MultimodalInputError as exc:
+        # 模型直接拒绝了这张图（如宽高 ≤10px、格式不被支持）——这是**入参问题**，
+        # 不是服务故障。与下面「模型说看不出动作」走同一条路（HTTP 400 → Java 9003），
+        # 用户看到的是「请换一张照片」而不是「服务暂时不可用，请稍后再试」。
+        logger.warning("姿态评估入参被模型拒绝: %s", exc)
+        raise AgentInputError(
+            "照片无法用于姿态评估（可能尺寸过小或格式不受支持），"
+            "请上传一张能看清全身、且包含完整动作过程的清晰照片"
+        ) from exc
 
     payload = extract_json_object(text)
     if not payload:
