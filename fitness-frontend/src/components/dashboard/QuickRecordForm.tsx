@@ -3,6 +3,14 @@ import { App, AutoComplete, Button, Card, Form, InputNumber, Rate, Space, Toolti
 import { useMemo } from 'react'
 import type { TrainingBatchItem, TrainingBatchRequest } from '@/types'
 
+/**
+ * 单次可提交的动作条目上限
+ * <p>
+ * 后端 `TrainingBatchRequest.records` 带 `@Size(max = 20)`，超了直接返回 9003。
+ * 在前端就卡住行数，避免用户填完一整屏才被拒。
+ */
+const MAX_ROWS = 20
+
 interface Props {
   /** 动作名候选项（训练模板里的动作 + 今日已记录过的动作） */
   actionOptions: string[]
@@ -168,16 +176,22 @@ export default function QuickRecordForm({ actionOptions, submitting, onSubmit }:
                 ))}
 
                 <div className="flex gap-2">
-                  <Button
-                    type="dashed"
-                    icon={<PlusOutlined />}
-                    onClick={() => add({ sets: 4, reps: 10, weightKg: 20, rpe: 6 })}
-                  >
-                    添加一组
-                  </Button>
+                  <Tooltip title={fields.length >= MAX_ROWS ? `单次最多 ${MAX_ROWS} 个动作（后端限制）` : ''}>
+                    <Button
+                      type="dashed"
+                      icon={<PlusOutlined />}
+                      disabled={fields.length >= MAX_ROWS}
+                      onClick={() => add({ sets: 4, reps: 10, weightKg: 20, rpe: 6 })}
+                    >
+                      添加一组
+                    </Button>
+                  </Tooltip>
                   <Button type="primary" htmlType="submit" loading={submitting}>
                     {submitting ? '正在保存...' : '提交训练记录'}
                   </Button>
+                  <span className="self-center text-xs text-gray-400">
+                    {fields.length} / {MAX_ROWS} 个动作
+                  </span>
                 </div>
               </>
             )}

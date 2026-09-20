@@ -89,15 +89,22 @@ export interface TrainingQueryParams {
   size?: number
 }
 
-/** 按动作查询响应（后端返回 Map，注意没有 page/size 字段） */
+/**
+ * 按动作查询响应
+ * <p>
+ * 注意三点（与后端逐字对齐）：
+ * - 它**不是** `PaginatedData`：后端不返回 `page`/`size`
+ * - `maxWeight`/`maxVolume` 是该动作的**历史最大**值，没有记录时是 `0` 而**不是 null**
+ * - 查询不传区间时后端默认从 2000-01-01 查到现在
+ */
 export interface ActionHistoryResponse {
   list: TrainingRecord[]
   total: number
   actionName: string
-  /** 该动作历史最大重量 */
-  maxWeight: number | null
-  /** 该动作历史最大容量 */
-  maxVolume: number | null
+  /** 该动作历史最大重量；无记录时为 0 */
+  maxWeight: number
+  /** 该动作历史最大容量；无记录时为 0 */
+  maxVolume: number
 }
 
 /** 修改记录响应（后端只回 id 与新容量） */

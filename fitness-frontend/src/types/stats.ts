@@ -61,19 +61,21 @@ export interface WeeklyStats {
 /**
  * 最新周计划
  * <p>
- * `suggestionText` 在 AI 回调写入前是空串（周日 20:00 的统计任务只写 weekSummary），
- * 因此页面要按空串处理「AI 建议尚未生成」的状态。
- * 完全没有该周记录时接口返回 `data: null`。
+ * 字段可空性与后端一致（`WeeklyPlanResponse` 全是包装类型）：
+ * - 周日 20:00 的统计任务只写 `weekSummary`，此时 `suggestionText` 为**空串**（不是 null）
+ * - AI 回调写入前若行是统计任务临时建的，`weekStart`/`createdAt` 一定有值；
+ *   但后端 DTO 允许 null，因此这里如实标注，避免页面 `dayjs(null)` 拿到 Invalid Date 还以为是解析问题
+ * - 完全没有该周记录时接口返回 `data: null`（不是错误码），页面应展示 Empty
  */
 export interface WeeklyPlan {
   id: number
   /** yyyy-MM-dd（周一） */
-  weekStart: string
+  weekStart: string | null
   /** AI 生成的 Markdown 建议；未生成时为空串 */
-  suggestionText: string
-  /** 本周数据摘要（JSON 字符串） */
+  suggestionText: string | null
+  /** 本周数据摘要（JSON **字符串**，不是对象） */
   weekSummary: string | null
   isRead: boolean
   /** yyyy-MM-dd HH:mm:ss */
-  createdAt: string
+  createdAt: string | null
 }

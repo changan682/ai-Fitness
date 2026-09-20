@@ -47,9 +47,11 @@ export interface ScheduleDay {
 
 /** 套用模板的响应 */
 export interface ApplyScheduleResponse {
-  scheduleId: number
+  /** 写入 t_user_workout_schedule 的首行 id；**模板没有任何动作时为 null** */
+  scheduleId: number | null
   /** yyyy-MM-dd */
   weekStart: string
+  /** 休息日不会出现在数组里，按 dayOfCycle 升序 */
   days: ScheduleDay[]
 }
 

@@ -130,14 +130,22 @@ export interface ChatMessage {
 
 // ==================== 7.5 知识库健康 ====================
 
-/** Milvus 知识库健康状态 */
+/**
+ * Milvus 知识库健康状态
+ * <p>
+ * ⚠️ 后端这几个字段都是包装类型（可为 null）。更要注意的是：
+ * **Milvus 不可用时后端返回 `code=6003` 且整个 `data` 为 null**
+ * （`GlobalExceptionHandler` 对业务异常一律把 data 置空），
+ * 而不是像规范示例那样返回 `data:{milvusConnected:false}`。
+ * 因此页面必须按 `code === 6003` 判断「知识库不可用」，不能靠读 `data.milvusConnected`。
+ */
 export interface KnowledgeHealth {
-  milvusConnected: boolean
-  collectionName: string
-  totalDocuments: number
+  milvusConnected: boolean | null
+  collectionName: string | null
+  totalDocuments: number | null
   /** yyyy-MM-dd HH:mm:ss（读自知识库清单的 built_at） */
   lastUpdated: string | null
   /** 如 "IVF_FLAT(COSINE, nlist=16)" */
-  indexType: string
-  embeddingDim: number
+  indexType: string | null
+  embeddingDim: number | null
 }
