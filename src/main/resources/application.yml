@@ -44,7 +44,9 @@ spring:
     # 3) serverTimezone：MySQL 8 无默认时区，不指定会按 UTC 解析 LocalDateTime。
     url: jdbc:mysql://${MYSQL_HOST:192.168.199.128}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:fitness_db}?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&createDatabaseIfNotExist=true
     username: ${MYSQL_USERNAME:root}
-    password: ${MYSQL_PASSWORD:123456}
+    # 密码必须通过环境变量注入（见 .env.example）：默认值只是「未配置」的占位符，
+    # 不是任何可用口令 —— 真实口令只应出现在被 gitignore 的 .env 里。
+    password: ${MYSQL_PASSWORD:change-me}
     driver-class-name: com.mysql.cj.jdbc.Driver
     hikari:
       pool-name: FitnessHikariCP
@@ -71,11 +73,12 @@ spring:
     redis:
       host: ${REDIS_HOST:192.168.199.128}
       port: ${REDIS_PORT:6379}
-      # 密码只从环境变量取，不写默认值（虚拟机的 Redis 开了 requirepass，实测密码为 123456）。
+      # 密码只从环境变量取，不写默认值（虚拟机的 Redis 开了 requirepass）。
       # 启动前必须设置，否则所有缓存/分布式锁/Token 黑名单操作都会抛 NOAUTH：
-      #   PowerShell : $env:REDIS_PASSWORD="123456"; mvn spring-boot:run
-      #   IDEA       : Run Configuration → Environment variables 里加 REDIS_PASSWORD=123456
-      #   命令行一次  : mvn spring-boot:run -Dspring-boot.run.jvmArguments="-DREDIS_PASSWORD=123456"
+      #   PowerShell : $env:REDIS_PASSWORD="<你的Redis密码>"; mvn spring-boot:run
+      #   IDEA       : Run Configuration → Environment variables 里加 REDIS_PASSWORD=<你的Redis密码>
+      #   命令行一次  : mvn spring-boot:run -Dspring-boot.run.jvmArguments="-DREDIS_PASSWORD=<你的Redis密码>"
+      # 推荐做法是写进项目根目录的 .env（Spring 通过 spring.config.import 读取），这样不必每次手动设。
       password: ${REDIS_PASSWORD:}
       database: 0
       timeout: 3000ms
@@ -102,7 +105,8 @@ spring:
     host: ${RABBITMQ_HOST:192.168.199.128}
     port: ${RABBITMQ_PORT:5672}
     username: ${RABBITMQ_USERNAME:agent1}
-    password: ${RABBITMQ_PASSWORD:123456}
+    # 同 MySQL：占位符默认值，真实口令只放 .env
+    password: ${RABBITMQ_PASSWORD:change-me}
     virtual-host: ${RABBITMQ_VHOST:/agent1}
     connection-timeout: 5000ms
     requested-heartbeat: 60s

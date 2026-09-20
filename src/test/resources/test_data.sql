@@ -12,7 +12,7 @@
 --   * 不写 t_food_library —— 30 种食物由 sql/init.sql 的种子数据提供，避免两处维护。
 --   * 日期使用 CURRENT_DATE 相对偏移，保证「今天/昨天/上周」这类断言与执行日期无关。
 --   * 需要「登录成功」链路的用例，请勿直接依赖本文件的 password 值：
---     请在测试里用 BCrypt.withDefaults().hashToString(12, "Abc@123456".toCharArray())
+--     请在测试里用 BCrypt.withDefaults().hashToString(12, "Abc@Test2026".toCharArray())
 --     现场生成哈希再落库，避免硬编码哈希与真实口令不一致造成误判。
 
 -- 清理（幂等，便于反复导入）
@@ -22,7 +22,7 @@ DELETE FROM t_diet_record     WHERE user_id IN (1001, 1002);
 DELETE FROM t_user            WHERE id IN (1001, 1002);
 
 -- ---------- 用户 ----------
--- password 为占位哈希（非 "Abc@123456" 的真实 BCrypt 值），仅供不需要登录的查询类用例使用
+-- password 为占位哈希（非 "Abc@Test2026" 的真实 BCrypt 值），仅供不需要登录的查询类用例使用
 INSERT INTO t_user (id, nickname, gender, birth_date, height, weight,
                     training_goal, training_level, injury_record, phone, password) VALUES
 (1001, '健身达人', 1, '1995-06-15', 175.0, 70.5, '增肌', '进阶', '["左肩旧伤"]',  '13800138000',

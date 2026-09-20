@@ -146,7 +146,7 @@ E:\Anaconde\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 # 2. Java BFF
 cd ..
-$env:REDIS_PASSWORD="123456"
+$env:REDIS_PASSWORD="<你的Redis密码>"
 mvn spring-boot:run
 
 # 3. 验收（4 个脚本，全部需要上面两个服务在跑）

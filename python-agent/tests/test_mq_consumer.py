@@ -570,7 +570,7 @@ class TestConnectionWiring:
             rabbitmq_port=5672,
             rabbitmq_vhost="/agent1",
             rabbitmq_user="agent1",
-            rabbitmq_password="123456",
+            rabbitmq_password="test-password",   # 测试替身值，刻意不同于任何真实口令
         )
         monkeypatch.setattr(mq_consumer, "_import_pika", lambda: FakePikaModule)
 

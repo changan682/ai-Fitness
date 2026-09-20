@@ -329,7 +329,7 @@ E:\Anaconde\python.exe scripts/verify_java_ai_endpoints.py
 
 # 5. AI 总结的双层缓存 / 同部位对比 / 变更失效（12 项）
 #    需要 Redis 密码才能验证「MySQL 兜底层」（否则该步会跳过）
-$env:REDIS_PASSWORD='123456'
+$env:REDIS_PASSWORD='<你的Redis密码>'
 E:\Anaconde\python.exe scripts/verify_summary_layers.py
 
 # 6. 知识库：统计 / 增量追加 / 重建（Milvus 需在线）

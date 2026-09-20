@@ -7,8 +7,10 @@ spring:
     # characterEncoding 用 Java 字符集名 UTF-8（写 utf8mb4 会导致连接池初始化即失败）；
     # allowPublicKeyRetrieval=true 用于 MySQL 8 caching_sha2_password 在非 TLS 连接下取公钥。
     url: jdbc:mysql://localhost:3306/fitness_db?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&createDatabaseIfNotExist=true
-    username: root
-    password: 123456
+    # 同样从环境变量取（本 profile 只把主机名固定为 localhost），
+    # 不要在仓库里写死口令：clone 者应在自己的 .env 里设置本地容器/实例的密码。
+    username: ${MYSQL_USERNAME:root}
+    password: ${MYSQL_PASSWORD:change-me}
 
   data:
     redis:

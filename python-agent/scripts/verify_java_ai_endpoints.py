@@ -74,9 +74,9 @@ def main() -> int:
     # ---------------- 准备用户与训练记录 ----------------
     phone = "130" + str(random.randint(10000000, 99999999))
     httpx.post(f"{base}/api/v1/user/register", timeout=30,
-               json={"nickname": "AI接口验收", "phone": phone, "password": "Abc@123456"})
+               json={"nickname": "AI接口验收", "phone": phone, "password": "Abc@Test2026"})
     token = httpx.post(f"{base}/api/v1/user/login", timeout=30,
-                       json={"phone": phone, "password": "Abc@123456"}).json()["data"]["token"]
+                       json={"phone": phone, "password": "Abc@Test2026"}).json()["data"]["token"]
     headers = {"Authorization": f"Bearer {token}"}
     print(f"  测试用户已就绪")
 

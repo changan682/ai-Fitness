@@ -4,7 +4,7 @@
 需要 Java(8080) 与 Python(8000) 都在运行。用法：
 
 ```powershell
-$env:REDIS_PASSWORD="123456"     # 交给 Java 用，脚本自己也会读
+$env:REDIS_PASSWORD="<你的Redis密码>"     # 交给 Java 用，脚本自己也会读
 E:\\Anaconde\\python.exe scripts/verify_summary_layers.py
 ```
 
@@ -124,11 +124,11 @@ def main() -> int:
 
     # ---------------- 准备用户与训练记录 ----------------
     r = httpx.post(f"{base}/api/v1/user/register",
-                   json={"nickname": "总结校验", "phone": phone, "password": "Abc@123456"}, timeout=30)
+                   json={"nickname": "总结校验", "phone": phone, "password": "Abc@Test2026"}, timeout=30)
     check("注册用户", r.json().get("code") == 0, str(r.json().get("code")))
 
     token = httpx.post(f"{base}/api/v1/user/login",
-                       json={"phone": phone, "password": "Abc@123456"}, timeout=30).json()["data"]["token"]
+                       json={"phone": phone, "password": "Abc@Test2026"}, timeout=30).json()["data"]["token"]
     headers = {"Authorization": f"Bearer {token}"}
     uid = httpx.get(f"{base}/api/v1/user/profile", headers=headers, timeout=30).json()["data"]["id"]
     print(f"  用户 id={uid}")

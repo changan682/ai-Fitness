@@ -172,9 +172,9 @@ def main() -> int:
     # ---------------- ① 准备用户与本周数据 ----------------
     phone = "139" + str(random.randint(10000000, 99999999))
     httpx.post(f"{base}/api/v1/user/register", timeout=30,
-               json={"nickname": "周计划链路验收", "phone": phone, "password": "Abc@123456"})
+               json={"nickname": "周计划链路验收", "phone": phone, "password": "Abc@Test2026"})
     login = httpx.post(f"{base}/api/v1/user/login", timeout=30,
-                       json={"phone": phone, "password": "Abc@123456"}).json()
+                       json={"phone": phone, "password": "Abc@Test2026"}).json()
     token = login["data"]["token"]
     user_id = login["data"]["user"]["id"]
     headers = {"Authorization": f"Bearer {token}"}
