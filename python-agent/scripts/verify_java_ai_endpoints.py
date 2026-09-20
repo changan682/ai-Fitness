@@ -22,16 +22,18 @@ E:\\Anaconde\\python.exe scripts/verify_java_ai_endpoints.py
 from __future__ import annotations
 
 import argparse
-import base64
 import random
 import sys
+from pathlib import Path
 
 import httpx
 
-# 1x1 像素的最小合法 PNG，避免依赖 PIL 等库来生成测试图片
-PNG_1PX = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=="
-)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# 共用测试图片（720x720 深蹲剪影）。**不能**用 1x1 的「最小合法 PNG」：
+# 模型要求宽高 >10px，且内容要能看清动作；经 Java 转发时 1x1 图更早在
+# ImageCompressor 就解不出来（表现为「图片读取失败」），请求根本到不了 Python。
+from _test_image import squat_image_bytes  # noqa: E402  - 必须在 sys.path 调整之后导入
 
 PASS = 0
 FAIL = 0
@@ -119,7 +121,7 @@ def main() -> int:
     # ---------------- 3) 姿态评估（multipart，本脚本的重点）----------------
     print("\n[3] POST /api/ai/pose-evaluate（multipart/form-data）")
     r = httpx.post(f"{base}/api/ai/pose-evaluate", headers=headers, timeout=90,
-                   files={"image": ("squat.png", PNG_1PX, "image/png")},
+                   files={"image": ("squat.jpg", squat_image_bytes(), "image/jpeg")},
                    data={"actionName": "深蹲"})
     body = r.json()
     data = body.get("data") or {}
@@ -185,7 +187,7 @@ def main() -> int:
           f"code={r.json().get('code')} msg={r.json().get('msg')}")
 
     r = httpx.post(f"{base}/api/ai/pose-evaluate", headers=headers, timeout=30,
-                   files={"image": ("x.png", PNG_1PX, "image/png")},
+                   files={"image": ("x.jpg", squat_image_bytes(), "image/jpeg")},
                    data={"actionName": "游泳"})
     check("非法动作名 → 9003（且调用 Python 之前就拦下）",
           r.json().get("code") == 9003, f"code={r.json().get('code')} msg={r.json().get('msg')}")

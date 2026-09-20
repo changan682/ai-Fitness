@@ -24,6 +24,12 @@
     </appender>
 
     <!-- ==================== 生产环境：JSON 结构化日志 ==================== -->
+    <!--
+      注意：本 appender 只在 prod profile 下被 <appender-ref> 引用。
+      非 prod（dev/docker/default）启动时 logback 会打印一条
+        "Appender named [JSON] not referenced. Skipping further processing."
+      这是**预期行为**（该 profile 下确实没引用它），不是配置错误，无需处理。
+    -->
     <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
         <encoder class="net.logstash.logback.encoder.LogstashEncoder">
             <!-- 只输出需要的 MDC 字段，避免把无关上下文全部打进日志 -->

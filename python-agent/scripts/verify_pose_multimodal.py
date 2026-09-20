@@ -31,7 +31,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# 同目录下的共用测试图片模块（scripts 自身也需在 sys.path 上）
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from _test_image import make_squat_jpeg  # noqa: E402  - 与另两个验收脚本共用同一张图
 from app.agent import evaluate_pose  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.multimodal import MultimodalError  # noqa: E402
@@ -53,54 +56,15 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 def make_synthetic_squat_png() -> bytes:
     """生成一张「下蹲剪影」合成图（故意画上膝盖内扣 + 弓背，看模型能否指出）。
 
-    依赖 Pillow；没装就返回 None，让调用方提示用户传 ``--image``。
+    绘图实现已抽到 ``scripts/_test_image.py``：``smoke_test.py`` 与
+    ``verify_java_ai_endpoints.py`` 也需要同一张图，三处共用一份避免再次出现
+    「某个脚本各自内联了一张 1x1 图」那类不一致（那正是它们接真实模型后必然失败的原因）。
+
+    依赖 Pillow；没装就返回空字节，由调用方提示用户改用 ``--image`` ——
+    本脚本不退回内置的低清图：它的断言依赖「模型真的给出了评估」，
+    用一张看不清的图只会得到「无法判断」，反而把原因搞混。
     """
-    try:
-        from PIL import Image, ImageDraw  # noqa: PLC0415 - 可选依赖，延迟导入
-    except ImportError:
-        return b""
-
-    import io
-    import random
-
-    w, h = 720, 720
-    img = Image.new("RGB", (w, h), (225, 222, 216))
-    d = ImageDraw.Draw(img)
-
-    for y in range(h):      # 墙面渐变
-        shade = int(232 - 26 * y / h)
-        d.line([(0, y), (w, y)], fill=(shade, shade - 2, shade - 6))
-    d.rectangle([0, 560, w, h], fill=(176, 141, 100))          # 木地板
-    for x in range(0, w, 60):
-        d.line([(x, 560), (x - 30, h)], fill=(150, 118, 82), width=2)
-
-    skin, cloth = (214, 176, 150), (58, 66, 82)
-    d.polygon([(258, 566), (306, 566), (312, 452), (268, 448)], fill=skin)   # 左小腿
-    d.polygon([(404, 566), (452, 566), (446, 452), (402, 448)], fill=skin)   # 右小腿
-    d.polygon([(268, 452), (312, 452), (392, 404), (352, 372)], fill=cloth)  # 左大腿
-    d.polygon([(402, 448), (446, 452), (452, 408), (398, 400)], fill=cloth)  # 右大腿
-    d.polygon([(340, 380), (400, 372), (424, 250), (366, 236)], fill=cloth)  # 躯干（前倾）
-    d.ellipse([(330, 350), (430, 420)], fill=cloth)                          # 臀部
-    d.polygon([(378, 250), (420, 246), (416, 214), (382, 216)], fill=skin)   # 颈
-    d.ellipse([(368, 158), (436, 226)], fill=skin)                           # 头
-    d.ellipse([(384, 176), (424, 210)], fill=(60, 48, 42))
-    d.polygon([(392, 268), (428, 262), (470, 240), (456, 218), (410, 246)], fill=skin)
-    d.polygon([(360, 272), (396, 268), (398, 236), (362, 240)], fill=skin)
-    d.line([(232, 232), (612, 232)], fill=(120, 122, 126), width=14)         # 杠铃
-    d.rectangle([(214, 196), (250, 268)], fill=(70, 72, 76))
-    d.rectangle([(596, 196), (632, 268)], fill=(70, 72, 76))
-
-    random.seed(7)
-    for _ in range(9000):   # 噪点：削弱「矢量图」特征
-        x, y = random.randrange(w), random.randrange(h)
-        r, g, b = img.getpixel((x, y))
-        n = random.randint(-12, 12)
-        img.putpixel((x, y), (max(0, min(255, r + n)), max(0, min(255, g + n)),
-                              max(0, min(255, b + n))))
-
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=88)
-    return buf.getvalue()
+    return make_squat_jpeg()
 
 
 def main() -> int:

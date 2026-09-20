@@ -22,8 +22,16 @@ import argparse
 import json
 import re
 import sys
+from pathlib import Path
 
 import httpx
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# 共用测试图片（720x720 深蹲剪影）。**不能**用 1x1 的「最小合法 PNG」：
+# 模型要求宽高 >10px，且内容要能看清动作，否则姿态评估会返回 400/9003，
+# 使本脚本在真实 AI 模式下必然失败（MOCK_MODE=true 时才「恰好通过」）。
+from _test_image import squat_image_b64  # noqa: E402  - 必须在 sys.path 调整之后导入
 
 # Windows 控制台默认 GBK，输出中文/Emoji 会炸，这里强制 UTF-8
 try:
@@ -211,7 +219,7 @@ def main() -> int:
         print("\n[4] POST /agent/v1/pose-evaluate")
         r = client.post(
             f"{BASE}/pose-evaluate",
-            json={"image_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==", "action_name": "深蹲"},
+            json={"image_base64": squat_image_b64(), "action_name": "深蹲"},
         )
         body = r.json()
         data = body.get("data") or {}
