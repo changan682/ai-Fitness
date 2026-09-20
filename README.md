@@ -30,6 +30,16 @@
 | 知识库健康检查 | 真实 Milvus 连接状态、文档数、索引参数、最后更新时间 |
 | **每周复盘（异步）** | Java 发 MQ → Python pika 消费 → LLM 生成下周计划 → HMAC 签名回调 Java 落库 |
 
+**前端（React + TS，5 个页面）**
+
+| 页面 | 能力 |
+|:---|:---|
+| 登录 / 注册 | 手机号密码登录、注册（密码强度指示、二次确认）、记住我（localStorage / sessionStorage 二选一）、被踢下线后登录回跳原页面 |
+| 训练看板 | 统计卡片（数字滚动）、快捷录入（动态增减动作条目 + 容量实时预览 + Ctrl+Enter 提交）、今日记录行内编辑与删除、**乐观更新 + 失败回滚** |
+| AI 助手 | 4 个 Tab：训练总结（Markdown + 缓存时间标记）、动作推荐（卡片错峰淡入）、姿态评估（拖拽上传 + 评分环）、健身问答（RAG 气泡 + 引用来源折叠 + 快捷提问） |
+| 数据趋势 | ECharts 三图：体重（原始虚线 + 7 日滑动平均实线）、每周容量柱状+次数折线、围度多折线；点柱子看该周训练明细 |
+| 个人档案 | 档案编辑（编辑/查看模式切换）+ 独立的体测录入表单，两者互不影响 |
+
 ---
 
 ## 二、技术栈
@@ -45,7 +55,7 @@
 | 大模型 | DeepSeek `deepseek-chat`（文本）、阿里云百炼 `qwen-vl-max`（多模态） |
 | 向量库 | Milvus v2.6.0（Docker）+ pymilvus 2.6.16，`IVF_FLAT + COSINE`，知识库 200 条 |
 | Embedding | 阿里云百炼 `text-embedding-v3`（768 维；可切本地 `text2vec-base-chinese`） |
-| 前端（第 8 周） | React 18 + TypeScript + Vite 5 + Ant Design 5 + ECharts + Zustand |
+| 前端 | React 18.3 + TypeScript 5.5（strict）+ Vite 5.4 + Ant Design 5 + Tailwind 3 + React Router 6 + Zustand 4.5 + TanStack Query 5 + Axios + ECharts 5 + react-markdown |
 
 ---
 
@@ -55,7 +65,7 @@
 ┌──────────────────────────── 本机 ────────────────────────────┐
 │                                                              │
 │  React+TS 前端 :5173 ──HTTP──▶ Java Spring Boot :8080         │
-│   （第 8 周）                   │  BFF：业务 + 鉴权 + 聚合       │
+│   （Vite proxy /api）           │  BFF：业务 + 鉴权 + 聚合       │
 │                                 ├──HTTP──▶ Python FastAPI :8000│
 │                                 │           （AI Agent）       │
 │                                 │              │ pymilvus      │
@@ -89,7 +99,9 @@
 ```
 agent2/
 ├── pom.xml                       # Maven 构建（Spring Boot 3.2.5）
-├── docker-compose.yml            # 本地 Milvus（含 etcd + MinIO）
+├── Dockerfile                    # Java BFF 生产镜像（见第七节说明）
+├── .dockerignore
+├── docker-compose.yml            # 默认只起 Milvus；另有 local-mw / apps 两组可选 profile
 ├── .env.example                  # Java 侧环境变量模板 → 复制为 .env
 ├── sql/init.sql                  # 10 张表的建表脚本（含索引与注释）
 ├── src/main/java/com/fitness/    # Java 源码
@@ -99,15 +111,26 @@ agent2/
 │   ├── cache/                    # 缓存封装、锁、Token 黑名单
 │   ├── task/                     # 定时任务 + 死信队列监控
 │   └── util/                     # JWT、HMAC 验签、图片压缩
-├── src/test/java/com/fitness/    # Java 测试（203 项）
+├── src/test/java/com/fitness/    # Java 测试（206 项）
 ├── python-agent/                 # Python AI 服务（详见其 README）
 │   ├── app/                      # 路由 / Agent / LLM / 多模态 / Milvus / MQ 消费者
 │   ├── data/seed_knowledge.json  # 知识库种子数据（200 条，5 大分类）
 │   ├── scripts/                  # Key 探活、入库工具、端到端验收脚本
-│   └── tests/                    # pytest（385 项）
+│   ├── tests/                    # pytest（392 项）
+│   ├── Dockerfile                # Python 生产镜像
+│   └── docker-entrypoint.sh      # 等 Milvus 就绪后再起 FastAPI
+├── fitness-frontend/             # React + TypeScript 前端（第 8 周）
+│   ├── src/api/                  # Axios 实例 + 拦截器 + 9 个模块（33 个接口）
+│   ├── src/types/                # 与后端 100% 对齐的 TS 类型
+│   ├── src/store/                # Zustand：登录态 + 今日训练本地状态
+│   ├── src/router/               # React Router v6 + 路由守卫
+│   ├── src/components/           # layout / auth / dashboard / ai / common
+│   ├── src/pages/                # Login / Dashboard / AIAssistant / Trends / Profile
+│   └── vite.config.ts            # /api 代理到 Java 8080 + @/ 路径别名
 ├── 检查报告-第1-3周.md
 ├── 第4周-AI链路打通说明.md
-└── 第5周-真实AI与RAG说明.md
+├── 第5周-真实AI与RAG说明.md
+└── 第8周-前端与编排说明.md
 ```
 
 > 说明：开发规范 `提示词.txt`（需求与接口契约的原始依据）属个人材料，**未包含在本仓库中**。
@@ -156,6 +179,17 @@ docker compose ps          # 等 milvus 变成 healthy（首次约 1 分钟）
 
 > 若拉取镜像超时，见 `docker-compose.yml` 顶部的镜像加速器说明。
 
+**没有那台虚拟机时**，可用可选 profile 在本地起中间件（默认不加 profile 时**只起 Milvus**，
+上面的日常流程完全不受影响）：
+
+```powershell
+docker compose --profile local-mw up -d   # 本地 MySQL8 + Redis7 + RabbitMQ3（含 init.sql 自动建表）
+docker compose --profile apps    up -d    # 再把 Java / Python 也容器化（需先 mvn package）
+```
+
+启用 `local-mw` 后，把根目录 `.env` 里的 `MYSQL_HOST` / `REDIS_HOST` / `RABBITMQ_HOST`
+改成 `localhost` 即可（`application-docker.yml` 这个 profile 就是为此准备的）。
+
 ### 3. 安装 Python 依赖并启动 AI 服务
 
 ```powershell
@@ -186,22 +220,34 @@ cd python-agent
 E:\Anaconde\python.exe -m app.mq_consumer
 ```
 
-### 6. 前端（第 8 周，尚未实现）
+### 6. 前端（第 8 周）
 
 ```powershell
-npm create vite@latest fitness-frontend -- --template react-ts
+cd fitness-frontend
+npm install
+npm run dev            # http://localhost:5173
 ```
+
+- 前端**只与 Java 交互**：Vite 把 `/api` 代理到 `http://localhost:8080`，
+  前端完全不知道 Python 与 Milvus 的存在（Java 是 BFF）。
+- 所以启动前端前，**Java 必须已在跑**；AI 相关页面还要求 Python 也在跑。
+- 类型检查与生产构建：`npm run typecheck`、`npm run build`（`build` 会先跑 tsc 再打包）。
+
+> ⚠️ 本机实测 Node 22 + npm 10 可用；README 上一节写的是「Node 18+」，Vite 5 要求 ≥18。
 
 ---
 
 ## 七、测试与验收
 
 ```powershell
-# Java：203 项
+# Java：206 项（含「实体 ↔ init.sql 列名契约」测试）
 mvn test
 
-# Python：385 项（不联网）
+# Python：392 项（不联网）
 cd python-agent; E:\Anaconde\python.exe -m pytest tests -q
+
+# 前端：严格模式类型检查 + 生产构建
+cd fitness-frontend; npm run typecheck; npm run build
 ```
 
 **端到端验收脚本**（需对应服务在线）：
@@ -226,7 +272,7 @@ cd python-agent; E:\Anaconde\python.exe -m pytest tests -q
 | 第 5 周 | Milvus + 知识库 200 条 + AI 训练总结 + RAG 问答 | ✅ |
 | 第 6 周 | 真实多模态姿态评估 + 动作推荐接 LLM + 知识入库工具 | ✅ |
 | 第 7 周 | RabbitMQ 异步闭环：发送 → 消费 → LLM → 回调 → 验签落库 | ✅ |
-| 第 8 周 | React+TS 前端联调 + Compose 编排 + 文档收尾 | ⏳ 待开始 |
+| 第 8 周 | React+TS 前端（5 个页面 / 33 个接口联调）+ Docker Compose 编排 + 文档收尾 | ✅ |
 
 ---
 
@@ -241,6 +287,11 @@ cd python-agent; E:\Anaconde\python.exe -m pytest tests -q
 | 检索参数 | `nlist=16`（经验值 ≈√N，N=200）、`nprobe=4`；启动时校验索引参数与配置是否一致 |
 | 业务口径 | 7 日滑动平均「缺失日期不补 0、样本 <3 返回 null」；连续训练天数「今日未练不算断」 |
 | AI 降级 | 入参问题（9003）原样返回给用户；服务不可用（6001/6002）才套兜底文案 |
+| 前端边界 | 前端零 Python 知识：只认同源 `/api`，由 Vite proxy 转发 Java；跨语言细节全封在 Java 的 BFF 里 |
+| 前端类型对齐 | `src/types` 逐字段对齐后端 DTO/实体（含 Map 接口），并区分「档案初始体重」与「体测跟踪体重」两套口径，避免类型说谎 |
+| 乐观更新 | 提交训练记录先改 UI 再发请求，失败用 mutation 前的**整表快照**回滚（比逐条撤销更简单且不会漏），成功用后端返回的权威 `volume` 替换占位行 |
+| 拦截器分工 | 业务失败也是 HTTP 200，故错误在**响应成功分支**按 `code` 分流；1002/6003 等表单级错误对拦截器静默、交页面处理，避免一处错误弹两次提示 |
+| Token 刷新 | 拦截器解析 JWT 的 `exp`，剩余 <24h 时先调 `/user/refresh` 再发原请求；并发只触发一次刷新，刷新失败不阻断原请求 |
 
 ---
 
@@ -252,4 +303,10 @@ cd python-agent; E:\Anaconde\python.exe -m pytest tests -q
 2. **依赖不在仓库里**：Python 依赖由 `python-agent/requirements.txt` 声明，Java 依赖由 `pom.xml` 管理，Milvus 由 `docker-compose.yml` 编排——这是正常的，克隆后按第六节步骤即可跑起来。
 3. **任务书/开题报告等 `.docx` 已被排除**（含学号与姓名）。需要提交时可注释掉 `.gitignore` 中的 `*.docx`。
 4. **开发规范 `提示词.txt` 未包含在本仓库**（个人需求材料）。代码注释里的「规范第 N 行」均指该文件，克隆者看不到，属预期。
-5. 各周详细说明见 `检查报告-第1-3周.md`、`第4周-AI链路打通说明.md`、`第5周-真实AI与RAG说明.md`，Python 侧细节见 `python-agent/README.md`。
+5. 各周详细说明见 `检查报告-第1-3周.md`、`第4周-AI链路打通说明.md`、`第5周-真实AI与RAG说明.md`、`第8周-前端与编排说明.md`，Python 侧细节见 `python-agent/README.md`。
+6. **`docker-compose.yml` 默认只起 Milvus**：MySQL/Redis/RabbitMQ 在虚拟机上、Java 与 Python 在 IDE 里跑（方便断点调试）。没有那台虚拟机时用
+   `--profile local-mw`（本地中间件）与 `--profile apps`（容器化 Java/Python），
+   详见 `第8周-前端与编排说明.md` 与 compose 文件顶部注释。
+7. **两个 Dockerfile 与规范示例有两处有意偏差**：Java 用 `eclipse-temurin:17-jre`
+   （官方 `openjdk` 镜像已停止维护），Python 用 `python:3.12-slim`（与本地实测环境一致）；
+   Java 镜像的 jar 名按 `pom.xml` 的 artifactId 取 `fitness-server-1.0.0.jar`。
