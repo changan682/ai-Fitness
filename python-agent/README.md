@@ -2,14 +2,16 @@
 
 Java BFF（Spring Boot）内网调用的 Python AI 能力服务，基于 **FastAPI + Pydantic v2**。
 
-> **当前进度：第 6 周。**
+> **当前进度：第 8 周（全部 AI 能力已完成）。**
 > Milvus 向量库、知识库（200 条 / 5 大分类）、RAG 检索链路已跑通并验证；
 > 五个同步 AI 能力（训练总结 / 动作推荐 / 姿态评估 / 知识库问答 / 知识库健康）**都已接真实模型**：
 >
 > - Embedding：阿里云百炼 `text-embedding-v3`（768 维）
 > - 大模型：DeepSeek `deepseek-chat`
-> - **多模态：通义千问 `qwen-vl-max`**（第 6 周新接，姿态评估不再返回假分数）
+> - **多模态：通义千问 `qwen-vl-max`**（第 6 周新接，姿态评估走真实看图推理）
 > - 动作推荐：DeepSeek 生成 + **动作名白名单校验**，失败回退内置动作库规则引擎
+> - 第 7 周：RabbitMQ 每周复盘异步链路（消费 → LLM → HMAC 回调 Java）
+> - 第 8 周：**给「模拟/降级」结果加标记**，见下方「8.1 哪些结果是真、哪些是折扣」
 >
 > ⚠️ **Key 要单独确认**：百炼的 Embedding 与 VL 是两套模型权限，Embedding 能用不代表 VL 已开通；
 > 大模型 Key 也可能失效。开工/答辩前先跑 `scripts/check_api_keys.py`（三项探活）。
@@ -44,10 +46,15 @@ python-agent/
 │   ├── check_api_keys.py          # Key 探活：大模型 / Embedding / 多模态 三项
 │   ├── ingest_knowledge.py        # 知识入库工具：--stats / --file / --rebuild / --dry-run
 │   ├── merge_seed_parts.py        # 合并分类种子 → seed_knowledge.json
+│   ├── verify_real_ai.py          # 真实 AI 链路验收（26 项，第 5 周起交付）
 │   ├── verify_pose_multimodal.py  # 姿态评估真实多模态端到端验证（10 项）
 │   ├── verify_weekly_plan_chain.py# 每周复盘异步链路：发送→消费→回调→验签（11 项）
 │   ├── verify_summary_layers.py   # AI 总结双层缓存/同部位对比/变更失效（12 项）
-│   └── verify_java_ai_endpoints.py# Java /api/ai/* 五接口端到端（27 项，含 multipart）
+│   ├── verify_java_ai_endpoints.py# Java /api/ai/* 五接口端到端（27 项，含 multipart）
+│   └── _test_image.py             # 验收脚本共用的测试图片（宽高须 >10px，见模块注释）
+├── tests/                    # pytest（401 项）
+├── Dockerfile                # 生产镜像（python:3.12-slim）
+├── docker-entrypoint.sh      # 等 Milvus 就绪后再起 FastAPI
 ├── requirements.txt
 ├── .env.example
 └── README.md
@@ -240,8 +247,8 @@ WARNING 未配置真实 Embedding（当前 provider=hashing）：RAG 检索只�
 | GET | `/agent/v1/health` | 服务健康检查 | — | `status`、`milvus_connected`、`llm_api_configured`、`knowledge_base_ready`、`timestamp` |
 | POST | `/agent/v1/summary` | 训练智能总结 | `{user_id, date, records:[{action,sets,reps,weight,rpe}], comparison}` | `summary`（Markdown）、`generated_at` |
 | POST | `/agent/v1/recommend` | 动作智能推荐 | `{target_muscle, equipment:[...], count}` | `recommendations:[{action_name,target_muscle,focus_area,recommended_sets,recommended_reps,difficulty,notes,equipment}]`、`generated_at` |
-| POST | `/agent/v1/pose-evaluate` | 动作姿态评估 | `{image_base64, action_name}` | `score`、`score_level`、`issues`、`suggestions`、`good_points`、`evaluated_at` |
-| POST | `/agent/v1/chat` | 知识库 RAG 问答 | `{question, category, user_id}` | `question`、`answer`（Markdown）、`sources:[{category,title,content,score}]`、`generated_at` |
+| POST | `/agent/v1/pose-evaluate` | 动作姿态评估 | `{image_base64, action_name}` | `score`、`score_level`、`issues`、`suggestions`、`good_points`、`evaluated_at`、**`data_source`** |
+| POST | `/agent/v1/chat` | 知识库 RAG 问答 | `{question, category, user_id}` | `question`、`answer`（Markdown）、`sources:[{category,title,content,score,`**`score_type`**`}]`、`generated_at`、**`data_source`**、**`degraded`**、**`degradation_reason`** |
 | GET | `/agent/v1/knowledge/health` | Milvus 知识库健康 | — | `milvus_connected`、`collection_name`、`total_documents`、`last_updated`、`index_type`、`embedding_dim` |
 
 > 对外只暴露 Java 的 `/api/ai/*`；`/agent/v1/*` 是内网接口，仅 Java 调用（规范第十一章第 3 条）。
@@ -305,7 +312,28 @@ question → Embedding(768维) → Milvus search(Top-5, COSINE, nprobe=4)
 | `summary` 的数字 | ✅ 总容量/动作数/最佳动作/对比幅度由入参真实计算 | 文案措辞 |
 | `summary` 的文案 | 配了 Key 后 ✅ DeepSeek 生成 | 无 Key 时为本地拼装 |
 | `recommend` | ✅ DeepSeek 生成 + **动作名白名单校验**（只允许动作库里的动作） | LLM 失败/越界时回退内置动作库规则引擎；`MOCK_MODE=true` 时只用规则引擎 |
-| `pose-evaluate` | ✅ **真实多模态推理**（qwen-vl-max 看图给分），`score_level` 由 `score` 严格派生 | 无 Key / `MOCK_MODE=true` 时才有本地模拟打分 |
+| `pose-evaluate` | ✅ **真实多模态推理**（qwen-vl-max 看图给分），`score_level` 由 `score` 严格派生 | `MOCK_MODE=true` 时才走本地模拟打分（由图片哈希派生），此时响应标 `data_source=mock_local` |
+
+### 8.1 哪些结果是真、哪些打了折扣（第 8 周新增的标记）
+
+第 4-6 周把接口都接上了真实模型，但留下一个隐患：**「模拟」与「降级」的结果在响应结构上与真实结果完全一致**。
+默认配置（`MOCK_MODE=true`）下姿态评估会返回 45-95 的编造分数、内置兜底问答会返回启发式「相关度」，
+调用方无从分辨。第 8 周做**纯增量**扩展，让每条结果自报来源：
+
+| 字段 | 取值 | 含义 |
+|:---|:---|:---|
+| `pose-evaluate` 的 `data_source` | `qwen_vl` / `mock_local` | 真实看图推理 / 本地模拟打分（**不是**图像分析） |
+| `chat` 的 `data_source` | `milvus` / `builtin` / `none` | 200 条真实知识库 / 内置 18 条兜底 / 没检索到来源（纯大模型回答） |
+| `chat` 的 `degraded` + `degradation_reason` | bool + 中文说明 | 是否走了降级路径、以及原因（直接展示给用户） |
+| `chat.sources[].score_type` | `cosine` / `heuristic` | 分数是真实余弦相似度 / 启发式合成值（**不同问题之间不可比**） |
+
+配套的界面行为（Java 透传、前端展示）：`mock_local` 时前端在结果上方显示「模拟结果（非真实图像分析）」；
+`degraded` 时气泡上显示「降级回答」与原因；`score_type=heuristic` 时分数标明为「合成分数」而不是伪装成余弦相似度。
+另外内置兜底的回答里**无条件**追加了一段降级说明 —— 原先只在「最高分低于阈值」时才提示，
+导致「命中的好」的问题拿回一份看不出任何降级痕迹、却带 0.97 分与引用的回答。
+
+> 相关回归测试：`tests/test_degradation_markers.py`（9 项，逐分支断言标记的实际取值，
+> 其中「高分兜底也必须带提示」那条是本次修复的核心防线）。
 
 ---
 

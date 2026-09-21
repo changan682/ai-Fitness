@@ -68,6 +68,13 @@ export interface PoseEvaluation {
   issues: string[]
   suggestions: string[]
   goodPoints: string[]
+  /**
+   * 结果来源
+   * <p>
+   * ⚠️ 必须据此标注：`mock_local` 表示这个分数是本地**模拟打分**（由图片哈希派生），
+   * 不是真实多模态推理。不标注就等于把编造的数字当成真实评估结果展示给用户。
+   */
+  dataSource: 'qwen_vl' | 'mock_local' | string
   /** yyyy-MM-dd HH:mm:ss */
   evaluatedAt: string
 }
@@ -87,8 +94,18 @@ export interface ChatSource {
   category: string
   title: string
   content: string
-  /** 余弦相似度（真实 Milvus 检索分数） */
+  /** 相关度得分；口径由 {@link ChatSource.scoreType} 声明 */
   score: number
+  /**
+   * 分数口径
+   * <p>
+   * - `cosine`：真实 Milvus 余弦相似度（0-1，越大越相关）
+   * - `heuristic`：内置兜底时的**启发式合成分数**（由关键词命中与二元组重合度算出），
+   *   **不是向量相似度**，不同问题之间也不可比
+   *
+   * 界面必须按口径区分展示 —— 把启发式分数当余弦相似度显示，与编造数据没有区别。
+   */
+  scoreType: 'cosine' | 'heuristic' | string
 }
 
 /** 问答请求 */
@@ -110,6 +127,18 @@ export interface ChatResponse {
   /** Markdown 回答 */
   answer: string
   sources: ChatSource[]
+  /**
+   * 来源库
+   * <p>
+   * - `milvus`：200 条真实知识库检索结果
+   * - `builtin`：内置 18 条兜底（此时 `sources[].scoreType` 必为 `heuristic`）
+   * - `none`：没检索到来源（纯大模型回答）
+   */
+  dataSource: 'milvus' | 'builtin' | 'none' | string
+  /** 是否走了降级路径（检索失败/无命中、无 LLM Key 本地拼装、内置兜底） */
+  degraded: boolean
+  /** 降级原因（中文说明），未降级时为 null */
+  degradationReason: string | null
   /** yyyy-MM-dd HH:mm:ss */
   generatedAt: string
 }
@@ -126,6 +155,12 @@ export interface ChatMessage {
   pending?: boolean
   /** 出错时的提示文案（显示错误卡片） */
   errorText?: string
+  /** 来源库（milvus/builtin/none）—— 用于标注「内置条目」 */
+  dataSource?: string
+  /** 是否为降级回答 */
+  degraded?: boolean
+  /** 降级原因 —— 直接展示给用户，说明这份回答打了什么折扣 */
+  degradationReason?: string | null
 }
 
 // ==================== 7.5 知识库健康 ====================

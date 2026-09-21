@@ -15,8 +15,10 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.DataIntegrityViolationException;
 
 import java.math.BigDecimal;
+import java.sql.SQLException;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
@@ -59,6 +61,30 @@ class BodyMetricServiceTest {
                 () -> service.addMetric(1001L, req));
         assertEquals(ErrorCode.BODY_METRIC_DUPLICATE.getCode(), ex.getCode(),
                 "当天已有记录应返回 3001");
+    }
+
+    @Test
+    @DisplayName("并发录入撞 uk_user_date → 3001（而不是冒成 9999）")
+    void addMetricShouldTranslateUniqueViolationToDuplicate() {
+        // 预检有竞态窗口：两个并发请求可能同时查到「没有」，于是都去 INSERT，
+        // 其中一个必然撞唯一索引。这条测试锁住「注释里承诺的 DB 兜底真的实现了」——
+        // 少了它，那种并发会以 9999「系统内部错误」的形式呈现给用户。
+        when(repository.findByUserIdAndRecordDate(anyLong(), any())).thenReturn(Optional.empty());
+        when(repository.saveAndFlush(any())).thenThrow(
+                new DataIntegrityViolationException(
+                        "could not execute statement",
+                        new SQLException(
+                                "Duplicate entry '1001-2026-09-21' for key 't_body_metric.uk_user_date'",
+                                "23000", 1062)));
+
+        BodyMetricRequest req = new BodyMetricRequest();
+        req.setRecordDate("2026-09-21");
+        req.setWeightKg(new BigDecimal("70.0"));
+
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> service.addMetric(1001L, req));
+        assertEquals(ErrorCode.BODY_METRIC_DUPLICATE.getCode(), ex.getCode(),
+                "撞唯一索引必须翻译成 3001，不能冒成 9999");
     }
 
     // ==================== 7日滑动平均：自然日窗口 + 最少样本数 ====================

@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { App as AntdApp, ConfigProvider } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
 import type { ReactElement } from 'react'
@@ -343,5 +344,83 @@ describe('路由守卫', () => {
 
     expect(await screen.findByText('受保护内容')).toBeInTheDocument()
     expect(screen.queryByText('登录页占位')).not.toBeInTheDocument()
+  })
+})
+
+// ==================== 降级 / 模拟标记在界面上的可见性 ====================
+
+describe('AI 标记的界面可见性', () => {
+  it('问答走内置兜底时：显示「降级回答」与原因，并把分数标明为合成分数', async () => {
+    // 旧实现的问题：内置 18 条兜底返回的 sources[].score 是启发式合成值
+    //（0.62 + 0.08*命中数 + 0.15*重合度），却与真实余弦相似度同形；
+    // 而且「命中的好」时连降级提示都没有 —— 界面上与真实 RAG 完全一致。
+    const aiApi = (await import('@/api/aiApi')).default
+    vi.mocked(aiApi.chat).mockResolvedValue({
+      question: '深蹲时膝盖可以超过脚尖吗？',
+      answer: '## 可以\n\n适度超过脚尖是正常的。',
+      sources: [
+        {
+          category: '动作要领',
+          title: '深蹲时膝盖与脚尖的位置关系',
+          content: '膝盖沿脚尖方向外推即可。',
+          score: 0.97,
+          scoreType: 'heuristic',
+        },
+      ],
+      dataSource: 'builtin',
+      degraded: true,
+      degradationReason: '知识库检索不可用，已退化为内置知识条目（相关度为启发式估计值）',
+      generatedAt: '2026-09-21 12:00:00',
+    })
+
+    const user = userEvent.setup()
+    renderWithProviders(<AIAssistantPage />)
+
+    await user.click(await screen.findByRole('tab', { name: '💬 健身问答' }))
+    await user.click(
+      await screen.findByRole('button', { name: '深蹲时膝盖可以超过脚尖吗？' }),
+    )
+
+    // 1) 降级标记可见
+    expect(await screen.findByText('降级回答（内置知识条目）')).toBeInTheDocument()
+    expect(screen.getByText(/已退化为内置知识条目/)).toBeInTheDocument()
+
+    // 2) 分数口径被如实标注，而不是伪装成余弦相似度
+    expect(screen.getByText(/相关度为启发式合成分数，非向量相似度/)).toBeInTheDocument()
+    expect(screen.getByText(/合成分数 0.97/)).toBeInTheDocument()
+  })
+
+  it('真实 RAG 回答：不出现任何降级标记，分数按余弦相似度展示', async () => {
+    const aiApi = (await import('@/api/aiApi')).default
+    vi.mocked(aiApi.chat).mockResolvedValue({
+      question: '深蹲时膝盖可以超过脚尖吗？',
+      answer: '## 可以\n\n真实检索结果生成的回答。',
+      sources: [
+        {
+          category: '动作要领',
+          title: '深蹲站距与脚尖外展',
+          content: '个体化选择。',
+          score: 0.7502,
+          scoreType: 'cosine',
+        },
+      ],
+      dataSource: 'milvus',
+      degraded: false,
+      degradationReason: null,
+      generatedAt: '2026-09-21 12:00:00',
+    })
+
+    const user = userEvent.setup()
+    renderWithProviders(<AIAssistantPage />)
+
+    await user.click(await screen.findByRole('tab', { name: '💬 健身问答' }))
+    await user.click(
+      await screen.findByRole('button', { name: '深蹲时膝盖可以超过脚尖吗？' }),
+    )
+
+    expect(await screen.findByText(/分数为 Milvus 余弦相似度/)).toBeInTheDocument()
+    expect(screen.queryByText(/降级回答/)).not.toBeInTheDocument()
+    // 余弦分数保留 4 位小数（与真实接口一致的展示口径）
+    expect(screen.getByText('0.7502')).toBeInTheDocument()
   })
 })

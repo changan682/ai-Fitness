@@ -17,11 +17,13 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.context.annotation.Import;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.nio.charset.StandardCharsets;
+import java.sql.SQLException;
 import java.time.LocalDate;
 import java.util.Optional;
 
@@ -246,13 +248,44 @@ class AICallbackControllerTest {
     }
 
     @Test
-    @DisplayName("落库时撞唯一索引（Redis 锁失效的兜底）→ 6001 而不是 9999")
+    @DisplayName("落库撞 uk_task_id 唯一键（Redis 锁失效的兜底）→ 6001 而不是 9999")
     void dataIntegrityViolationShouldReturn6001() throws Exception {
         given(weeklyPlanRepository.save(any(WeeklyPlan.class)))
-                .willThrow(new org.springframework.dao.DataIntegrityViolationException("uk_task_id"));
+                .willThrow(duplicateTaskIdViolation());
 
         mockMvc.perform(signedRequest(BODY, currentTimestamp()))
-                .andExpect(jsonPath("$.code").value(6001));
+                .andExpect(jsonPath("$.code").value(6001))
+                .andExpect(jsonPath("$.msg").value("任务已处理（幂等返回）"));
+    }
+
+    @Test
+    @DisplayName("落库因其它约束失败（如字段过长）→ 9999，**不能**伪装成「任务已处理」")
+    void otherConstraintViolationShouldNotBeReportedAsDuplicate() throws Exception {
+        // DataIntegrityViolationException 同时覆盖字段过长(1406)/越界(1264)/NOT NULL(1048)。
+        // 若一律按「已处理」返回 6001，Python 会视为成功而 ACK ——
+        // 这条 AI 建议就此静默丢失，且永远不会重试。所以必须区分开。
+        SQLException tooLong = new SQLException(
+                "Data too long for column 'task_id' at row 1", "22001", 1406);
+        given(weeklyPlanRepository.save(any(WeeklyPlan.class)))
+                .willThrow(new DataIntegrityViolationException("could not execute statement", tooLong));
+
+        mockMvc.perform(signedRequest(BODY, currentTimestamp()))
+                .andExpect(jsonPath("$.code").value(9999));
+    }
+
+    /**
+     * 构造一个**形态真实**的唯一键冲突异常
+     * <p>
+     * 之前这里直接 new 一个只有文本的 DataIntegrityViolationException，
+     * 那测的是「我 catch 了异常」，而不是「我真的识别出了 uk_task_id 冲突」——
+     * 一旦判定逻辑收紧（现在是「错误码 1062 且消息含索引名」），那种桩就失去意义。
+     * 因此这里带上与 MySQL 一致的 cause 链。
+     */
+    private static DataIntegrityViolationException duplicateTaskIdViolation() {
+        SQLException duplicate = new SQLException(
+                "Duplicate entry 'weekly-plan-1001-2026-08-03' for key 't_weekly_plan.uk_task_id'",
+                "23000", 1062);
+        return new DataIntegrityViolationException("could not execute statement", duplicate);
     }
 
     // ==================== 入参校验 ====================

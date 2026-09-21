@@ -8,6 +8,14 @@
 2. ``generated_at`` 等字段类型是 ``datetime``，Pydantic 序列化后是 **ISO8601**
    （如 ``2026-07-30T15:35:00``）。Java 侧 ``PySummaryData.generatedAt`` 声明为 String
    并已适配 ISO8601，不要自行改成 ``yyyy-MM-dd HH:mm:ss``。
+
+**关于本文件里几个「规范没有、但我们主动加上」的字段**（``data_source`` /
+``score_type`` / ``degraded`` / ``degradation_reason``）：
+规范只定义了分数本身，没定义「这个分数是怎么来的」。这在接入真实模型后成了问题 ——
+``MOCK_MODE=true`` 时姿态评估会返回由图片哈希派生的分数，内置兜底问答会返回启发式
+「相关度」，两者与真实推理/真实余弦相似度**在响应结构上完全一致**，调用方无从分辨。
+因此这里做**纯增量**扩展（只加字段、不改既有字段名与约束），让调用方能把模拟结果
+如实标出来。规范强调「分数与等级自洽由代码保证」，同理「分数的来源也由代码如实声明」。
 """
 
 from datetime import date, datetime
@@ -80,6 +88,10 @@ class PoseEvaluateResponse(BaseModel):
     suggestions: List[str]
     good_points: List[str]
     evaluated_at: datetime
+    #: 结果来源。**必须如实告知调用方**，否则「模拟打分」与「真实多模态推理」不可区分。
+    #: - ``qwen_vl``：真实调用 qwen-vl-max 看图推理
+    #: - ``mock_local``：MOCK_MODE=true 时的本地模拟打分（由图片哈希派生，**不是图像分析**）
+    data_source: str = "qwen_vl"
 
 
 # --- RAG 问答 ---
@@ -94,6 +106,11 @@ class ChatSource(BaseModel):
     title: str
     content: str
     score: float
+    #: ``score`` 的口径。**这一项是防止「编造的相似度」被当成真实检索分数展示**：
+    #: - ``cosine``：真实 Milvus 余弦相似度（0-1，越大越相关）
+    #: - ``heuristic``：内置 18 条兜底时的启发式合成分数（由关键词命中与二元组重合度算出，
+    #:   **与向量相似度无关**，不同问题之间也不可比）
+    score_type: str = "cosine"
 
 
 class ChatResponse(BaseModel):
@@ -101,6 +118,13 @@ class ChatResponse(BaseModel):
     answer: str  # Markdown
     sources: List[ChatSource]
     generated_at: datetime
+    #: 来源库。``milvus``=200 条真实知识库检索；``builtin``=内置 18 条兜底；
+    #: ``none``=没检索到任何来源（纯大模型回答）
+    data_source: str = "milvus"
+    #: 是否走了降级路径（检索失败/无命中、无 LLM Key 本地拼装、内置兜底）
+    degraded: bool = False
+    #: 降级原因（给人看的中文说明），未降级时为 None
+    degradation_reason: Optional[str] = None
 
 
 # --- Milvus 健康检查 ---

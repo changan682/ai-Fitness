@@ -12,6 +12,7 @@ import com.fitness.exception.ErrorCode;
 import com.fitness.repository.BodyMetricRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -85,7 +86,18 @@ public class BodyMetricService {
                 .bodyFatPct(req.getBodyFatPct())
                 .build();
 
-        metric = bodyMetricRepository.save(metric);
+        // 上面的预检能挡住绝大多数重复，但它有竞态窗口：两个并发请求可能同时查到「没有」，
+        // 于是都去 INSERT。uk_user_date 唯一索引是并发下的最终兜底 —— 这里必须显式捕获并
+        // 翻译成 3001，否则异常会冒到全局处理器变成 9999「系统内部错误」，
+        // 注释里承诺的「DB 唯一索引兜底」等于没有实现。
+        // 用 saveAndFlush 而不是 save：让 INSERT 立刻执行，异常才能在这里被抓住
+        //（save 可能把 INSERT 推迟到事务提交，那时已经出了本方法的 try 范围）。
+        try {
+            metric = bodyMetricRepository.saveAndFlush(metric);
+        } catch (DataIntegrityViolationException e) {
+            log.warn("并发录入撞 uk_user_date，按「当天已有记录」处理: userId={}, date={}", userId, recordDate);
+            throw new BusinessException(ErrorCode.BODY_METRIC_DUPLICATE);
+        }
 
         // 写穿透：录入后立即刷新 metric:latest，并失效 metric:avg7d
         writeLatestCache(userId, metric);

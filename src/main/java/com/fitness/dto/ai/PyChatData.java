@@ -28,6 +28,17 @@ public class PyChatData {
     @JsonProperty("generated_at")
     private String generatedAt;
 
+    /** 来源库：milvus / builtin / none */
+    @JsonProperty("data_source")
+    private String dataSource;
+
+    /** 是否走了降级路径 */
+    private Boolean degraded;
+
+    /** 降级原因（中文说明） */
+    @JsonProperty("degradation_reason")
+    private String degradationReason;
+
     /** 单条知识来源 */
     @Data
     @JsonIgnoreProperties(ignoreUnknown = true)
@@ -39,7 +50,11 @@ public class PyChatData {
 
         private String content;
 
-        /** 向量相似度得分 */
+        /** 相关度得分；口径由 {@link #scoreType} 声明 */
         private BigDecimal score;
+
+        /** cosine=真实余弦相似度；heuristic=内置兜底的启发式合成分数 */
+        @JsonProperty("score_type")
+        private String scoreType;
     }
 }

@@ -66,6 +66,10 @@ export default function ChatTab() {
                 content: data.answer,
                 sources: data.sources,
                 generatedAt: data.generatedAt,
+                // 降级标记一起带进气泡：兜底回答必须在界面上可辨认
+                dataSource: data.dataSource,
+                degraded: data.degraded,
+                degradationReason: data.degradationReason,
               }
             : m,
         ),
@@ -167,12 +171,32 @@ export default function ChatTab() {
 
               {m.role === 'assistant' && !m.pending && !m.errorText && (
                 <div>
+                  {/*
+                    降级标注：后端会在这些情况下打标记 ——
+                    检索失败/无命中（纯大模型回答）、无 LLM Key 本地拼装、内置 18 条兜底。
+                    不显示的话，「兜底回答」与真实 RAG 回答在界面上完全一样，
+                    而兜底来源的相关度其实是启发式合成分数，不是余弦相似度。
+                  */}
+                  {m.degraded && (
+                    <Alert
+                      type={m.dataSource === 'builtin' ? 'warning' : 'info'}
+                      showIcon
+                      className="mb-2"
+                      message={m.dataSource === 'builtin' ? '降级回答（内置知识条目）' : '降级回答'}
+                      description={m.degradationReason ?? undefined}
+                    />
+                  )}
+
                   <MarkdownView content={m.content} />
 
                   {m.sources && m.sources.length > 0 && (
                     <div className="mt-2">
                       <div className="mb-1 text-xs text-gray-500">
-                        📚 参考来源（{m.sources.length} 条，分数为 Milvus 相似度）
+                        📚 参考来源（{m.sources.length} 条，
+                        {m.sources[0].scoreType === 'heuristic'
+                          ? '相关度为启发式合成分数，非向量相似度'
+                          : '分数为 Milvus 余弦相似度'}
+                        ）
                       </div>
                       <Collapse
                         size="small"
@@ -182,7 +206,12 @@ export default function ChatTab() {
                             <span className="text-xs">
                               <Tag color="blue">{s.category}</Tag>
                               {s.title}
-                              <span className="ml-2 text-gray-400">{s.score.toFixed(4)}</span>
+                              <span className="ml-2 text-gray-400">
+                                {/* 按口径区分展示：合成分数不能伪装成余弦相似度 */}
+                                {s.scoreType === 'heuristic'
+                                  ? `合成分数 ${s.score.toFixed(2)}`
+                                  : s.score.toFixed(4)}
+                              </span>
                             </span>
                           ),
                           children: <div className="text-xs text-gray-600">{s.content}</div>,

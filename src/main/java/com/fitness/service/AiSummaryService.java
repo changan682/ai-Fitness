@@ -19,6 +19,7 @@ import com.fitness.util.ActionMuscleMapper;
 import com.fitness.util.AiTimeUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -183,6 +184,31 @@ public class AiSummaryService {
      * </ul>
      */
     void persist(Long userId, LocalDate date, String summary, String snapshot) {
+        try {
+            upsertRow(userId, date, summary, snapshot);
+        } catch (DataIntegrityViolationException e) {
+            // 并发场景：两个线程都没查到行、都去 INSERT，其中一个必然撞 uk_user_date。
+            // 不能让它冒成 9999 —— 重读一次改成 UPDATE 即可（另一个线程写入的也是同一天同快照的
+            // 内容，等价；重写一次只是把最新文案落库）。
+            log.warn("AI 总结并发写入撞 uk_user_date，改为更新已存在的行: userId={}, date={}", userId, date);
+            try {
+                upsertRow(userId, date, summary, snapshot);
+            } catch (Exception retryError) {
+                // 兜底：DB 只是「Redis 失效后的第二层」，这层写失败不影响本次返回，
+                // 但要把原因留在日志里（否则历史总结会在重启后消失且无人知晓）。
+                log.warn("AI 总结重试写库仍失败（Redis 层已有缓存，不影响本次结果）: userId={}, date={}, err={}",
+                        userId, date, retryError.getMessage());
+            }
+        }
+    }
+
+    /**
+     * 真正的写库动作（查一行→写字段→flush）
+     * <p>
+     * 用 {@code saveAndFlush} 而不是 {@code save}：唯一键冲突要在这一层立刻抛出，
+     * 才能被 {@link #persist} 捕获并转成「改为更新」；推迟到事务提交时就已经出了 catch 范围。
+     */
+    private void upsertRow(Long userId, LocalDate date, String summary, String snapshot) {
         AiSummaryCache row = aiSummaryCacheRepository
                 .findByUserIdAndSummaryDate(userId, date)
                 .orElseGet(() -> AiSummaryCache.builder()
@@ -191,7 +217,7 @@ public class AiSummaryService {
                         .build());
         row.setSummaryText(summary == null ? "" : summary);
         row.setInputSnapshot(snapshot);
-        aiSummaryCacheRepository.save(row);
+        aiSummaryCacheRepository.saveAndFlush(row);
     }
 
     // ==================== Redis 读写 ====================

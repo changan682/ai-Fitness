@@ -131,6 +131,8 @@ public class AiProxyService {
                     .issues(data.getIssues())
                     .suggestions(data.getSuggestions())
                     .goodPoints(data.getGoodPoints())
+                    // 如实透传来源：mock_local 表示这是模拟打分，前端必须显式标注出来
+                    .dataSource(data.getDataSource())
                     .evaluatedAt(AiTimeUtil.parseIsoOrNow(data.getEvaluatedAt()))
                     .build();
         });
@@ -191,6 +193,8 @@ public class AiProxyService {
                             .title(s.getTitle())
                             .content(s.getContent())
                             .score(s.getScore())
+                            // 分数口径必须一起透传：heuristic 表示这是内置兜底的合成分数
+                            .scoreType(s.getScoreType())
                             .build());
                 }
             }
@@ -199,6 +203,10 @@ public class AiProxyService {
                     .question(data.getQuestion() != null ? data.getQuestion() : req.getQuestion())
                     .answer(data.getAnswer())
                     .sources(sources)
+                    // 降级标记原样透传给前端，让「兜底回答」在界面上可辨认
+                    .dataSource(data.getDataSource())
+                    .degraded(data.getDegraded())
+                    .degradationReason(data.getDegradationReason())
                     .generatedAt(AiTimeUtil.parseIsoOrNow(data.getGeneratedAt()))
                     .build();
         });

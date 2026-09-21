@@ -123,8 +123,19 @@ DATA_KEYS = {
         "suggestions",
         "good_points",
         "evaluated_at",
+        # 结果来源（qwen_vl / mock_local）—— 缺了它，调用方无法分辨真实推理与模拟打分
+        "data_source",
     },
-    "chat_with_rag": {"question", "answer", "sources", "generated_at"},
+    "chat_with_rag": {
+        "question",
+        "answer",
+        "sources",
+        "generated_at",
+        # 降级标记三件套 —— 缺了它们，内置兜底会被当成真实 RAG 结果
+        "data_source",
+        "degraded",
+        "degradation_reason",
+    },
     "get_knowledge_health": {
         "milvus_connected",
         "collection_name",
@@ -485,11 +496,21 @@ class TestSuccessPath:
         }
 
     def test_chat_source_fields_are_complete(self, client, offline_agent):
-        """防回归：RAG 来源条目字段齐全且带 score（前端要展示引用出处与相关度）。"""
+        """防回归：RAG 来源条目字段齐全且带 score 与 score_type。
+
+        ``score_type`` 是必须的：它声明这个分数是真实余弦相似度还是启发式合成值，
+        前端要据此决定是否给出「合成分数」提示（见 test_degradation_markers.py）。
+        """
         data = _call(client, "post", CHAT_PATH, CHAT_BODY).json()["data"]
 
         assert data["sources"], "sources 不能为空"
-        assert set(data["sources"][0].keys()) == {"category", "title", "content", "score"}
+        assert set(data["sources"][0].keys()) == {
+            "category",
+            "title",
+            "content",
+            "score",
+            "score_type",
+        }
 
 
 # ============================================================

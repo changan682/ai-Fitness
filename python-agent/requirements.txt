@@ -38,7 +38,7 @@ redis>=5.0
 # 这两个不在"服务运行时"的必需路径上，但**不装就跑不了仓库里的测试与验收脚本**，
 # 属于"clone 下来看起来完整、实际跑不起来"的常见坑，因此显式列出。
 #
-# pytest：tests/ 下 385 项单测（python-agent 目录下执行 `python -m pytest tests -q`）
+# pytest：tests/ 下 401 项单测（python-agent 目录下执行 `python -m pytest tests -q`）
 pytest>=7.0
 # pillow：scripts/verify_pose_multimodal.py 生成"深蹲剪影"合成图用；
 #         脚本里是惰性导入，没装时会提示改用 --image 传自己的照片，不会报错中断

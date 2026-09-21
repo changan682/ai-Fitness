@@ -1495,6 +1495,7 @@ def _evaluate_pose_multimodal(
         suggestions=suggestions,
         good_points=good_points,
         evaluated_at=now_local(),
+        data_source="qwen_vl",  # 真实多模态推理，如实标注来源
     )
 
 
@@ -1568,6 +1569,10 @@ def _evaluate_pose_local(
     分数由「动作名 + 图片长度 + 图片前 64 字符」的 SHA256 稳定派生
     （同一张图同一动作结果可复现），素材取自 :data:`POSE_EVALUATION_LIBRARY`。
     这**不是**真实的图像推理，只为无 Key 环境提供可演示的确定性输出。
+
+    ⚠️ 返回结果的 ``data_source`` 固定为 ``mock_local``：这个分数与真实多模态推理
+    在响应结构上完全一致，若不标注，调用方（Java/前端）会把编造的数字当成真实评估结果
+    展示给用户 —— 那既是产品问题，也是诚信问题。
     """
     digest = hashlib.sha256(
         f"{action}|{base64_length}|{str(image_bytes[:64])}".encode("utf-8")
@@ -1579,8 +1584,9 @@ def _evaluate_pose_local(
     issue_count = 4 if score < 50 else 3 if score < 70 else 2 if score < 90 else 1
     good_count = 1 if score < 50 else 2 if score < 90 else 3
 
-    logger.info(
-        "姿态评估完成(Mock): action=%s imageBase64Length=%d imageBytes=%d score=%d level=%s",
+    logger.warning(
+        "姿态评估完成(Mock 模拟打分，非图像推理): action=%s imageBase64Length=%d "
+        "imageBytes=%d score=%d level=%s",
         action,
         base64_length,
         len(image_bytes),
@@ -1594,6 +1600,7 @@ def _evaluate_pose_local(
         suggestions=library["suggestions"][:issue_count],
         good_points=library["good_points"][:good_count],
         evaluated_at=now_local(),
+        data_source="mock_local",
     )
 
 
@@ -1880,10 +1887,14 @@ def chat_with_rag(
     **三层降级**，任何一层可用都不会让调用方拿到 500：
 
     1. **完整 RAG**：Embedding → Milvus Top-5 检索 → DeepSeek 基于 Context 生成
-    2. **纯 LLM**（Milvus 不可用）：不做检索直接问大模型，
-       并按规范第 3547 行在回答里标注「知识库不可用，回答可能不够准确」
-    3. **内置知识库**（既无 Milvus 也无 LLM Key）：用项目内置知识条目做词法检索，
-       保证离线/无 Key 时接口依然返回有意义的内容（第 4 周已验证的实现）
+    2. **检索结果 + 本地拼装**（Milvus 可用但无 LLM Key 或 MOCK_MODE=true）：
+       保留真实检索来源，只是回答未经大模型润色
+    3. **内置知识库**（检索也不可用）：用项目内置 18 条知识做词法检索
+
+    ⚠️ 走第 3 层时**必须**让调用方看出来：该层的 ``sources[].score`` 是启发式合成值
+    （不是余弦相似度），来源也不是 200 条真实知识库。因此返回值里带上
+    ``data_source`` / ``degraded`` / ``degradation_reason`` / ``sources[].score_type``
+    四个标记 —— 少了它们，调用方会把兜底结果当成真实 RAG 结果展示。
 
     :raises AgentInputError: 问题为空（HTTP 400）
     """
@@ -1974,10 +1985,15 @@ def _chat_with_real_rag(
                     title=hit.title,
                     content=hit.content,
                     score=round(float(hit.score), 4),
+                    score_type="cosine",  # 来源仍是真实 Milvus 检索，分数是余弦相似度
                 )
                 for hit in hits
             ],
             generated_at=now_local(),
+            # 来源是真实知识库，但回答未经大模型润色 —— 两者分开标注，避免误读
+            data_source="milvus",
+            degraded=True,
+            degradation_reason=f"{reason}：已用真实检索结果本地拼装回答，未经大模型润色",
         )
 
     # ---- 生成回答 ----
@@ -2002,6 +2018,7 @@ def _chat_with_real_rag(
             title=hit.title,
             content=hit.content,
             score=round(float(hit.score), 4),
+            score_type="cosine",
         )
         for hit in hits
     ]
@@ -2011,7 +2028,19 @@ def _chat_with_real_rag(
         len(sources), degraded, llm.model,
     )
     return ChatResponse(
-        question=question, answer=answer, sources=sources, generated_at=now_local()
+        question=question,
+        answer=answer,
+        sources=sources,
+        generated_at=now_local(),
+        # 检索失败/无命中时 hits 为空 → 来源实为「无」，如实标注成 none，
+        # 避免前端把「没有来源」与「来源是知识库」混为一谈
+        data_source="milvus" if sources else "none",
+        degraded=degraded,
+        degradation_reason=(
+            "知识库检索失败或无命中，已退化为纯大模型回答（本条回答未使用知识库）"
+            if degraded
+            else None
+        ),
     )
 
 
@@ -2059,18 +2088,35 @@ def _chat_with_mock_knowledge(
             title=entry["title"],
             content=entry["content"],
             score=round(float(score), 2),
+            # 这个分数由关键词命中数 + 字符二元组重合度合成（见 _score_entry），
+            # **不是**向量余弦相似度，不同问题之间也不可比 —— 必须如实标注口径
+            score_type="heuristic",
         )
         for score, entry in top
     ]
     answer = _build_rag_answer(text, top)
-    logger.info(
-        "知识库问答完成(内置兜底): 返回来源=%d 条 topScore=%.2f 分类=%s",
+    # ⚠️ 这里**无条件**追加降级说明。
+    # 原因：_build_rag_answer 只在 best_score < 阈值时才提示「未检索到高度相关的资料」，
+    # 于是「命中的好」的问题会拿回一份看不出任何降级痕迹的回答 —— 却带着 0.97 这类
+    # 看似余弦相似度的分数与「📚 参考」引用，与真实 RAG 回答无法区分。
+    answer += (
+        "\n\n> ⚠️ **本次回答来自内置知识条目，不是 Milvus 知识库检索结果**。"
+        "知识库暂时不可用，上面的相关度为启发式估计值（非向量相似度），仅供参考。"
+    )
+    logger.warning(
+        "知识库问答完成(内置兜底，非 Milvus 检索): 返回来源=%d 条 topScore=%.2f 分类=%s",
         len(sources),
         sources[0].score if sources else 0.0,
         normalized_category or "全部",
     )
     return ChatResponse(
-        question=text, answer=answer, sources=sources, generated_at=now_local()
+        question=text,
+        answer=answer,
+        sources=sources,
+        generated_at=now_local(),
+        data_source="builtin",
+        degraded=True,
+        degradation_reason="知识库检索不可用，已退化为内置知识条目（相关度为启发式估计值）",
     )
 
 

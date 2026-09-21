@@ -20,6 +20,10 @@ export default mergeConfig(
       // 样式不参与断言，关掉可省大量解析时间
       css: false,
       include: ['src/**/*.{test,spec}.{ts,tsx}'],
+      // antd 组件在 jsdom 里挂载较慢（页面级用例 3-10s），
+      // vitest 默认 5s 超时会把正常用例判成失败，放宽到 30s
+      testTimeout: 30_000,
+      hookTimeout: 30_000,
       // 渲染失败时报出 antd 的告警，便于定位
       silent: false,
     },

@@ -32,5 +32,14 @@ public class AiPoseResponse {
 
     private List<String> goodPoints;
 
+    /**
+     * 结果来源：{@code qwen_vl}=真实多模态推理；{@code mock_local}=本地模拟打分。
+     * <p>
+     * ⚠️ 这个字段是**必须**的：{@code MOCK_MODE=true} 时 Python 返回的分数由图片哈希派生
+     * （45-95），与真实推理结果在结构上完全一致。没有它，前端会把编造的数字
+     * 当成真实评估结果展示给用户 —— 既是产品问题，也是诚信问题。
+     */
+    private String dataSource;
+
     private LocalDateTime evaluatedAt;
 }

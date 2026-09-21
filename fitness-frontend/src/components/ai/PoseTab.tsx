@@ -193,6 +193,20 @@ export default function PoseTab() {
 
       {!mutation.isPending && result && (
         <div>
+          {/*
+            来源标注：MOCK_MODE=true 时后端返回的是本地模拟打分（由图片哈希派生），
+            与真实多模态推理的响应结构完全一致。不标注就等于把编造的数字
+            当成真实评估结果展示给用户 —— 因此这里必须显眼说明。
+          */}
+          {result.dataSource === 'mock_local' && (
+            <Alert
+              type="warning"
+              showIcon
+              className="mb-3"
+              message="模拟结果（非真实图像分析）"
+              description="当前服务处于 MOCK_MODE：评分与问题清单由本地算法生成，照片并未发送给多模态模型。此结果仅用于演示链路，请勿作为训练依据。"
+            />
+          )}
           <Space align="start" size="large" wrap>
             <Progress
               type="circle"
@@ -202,7 +216,7 @@ export default function PoseTab() {
             />
             <div>
               <div className="mb-2 text-base">
-                标准度评分：
+                标准度评分{result.dataSource === 'mock_local' ? '（模拟）' : ''}：
                 <Tag color={scoreColor(result.score)}>{result.scoreLevel}</Tag>
               </div>
               {result.goodPoints.length > 0 && (

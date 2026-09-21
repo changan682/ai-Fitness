@@ -298,7 +298,8 @@ def chat(request: ChatRequest) -> AgentResponse:
     summary="Milvus 知识库健康检查",
 )
 def knowledge_health() -> AgentResponse:
-    """Milvus 知识库健康状态（当前为 Mock 数据）。"""
+    """Milvus 知识库健康状态（**真实探测**：连接状态、文档数、索引类型与维度、
+    最后更新时间读自知识库清单的 built_at）。"""
     return _ok(agent.get_knowledge_health().model_dump(mode="json"))
 
 

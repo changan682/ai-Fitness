@@ -21,6 +21,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.nio.charset.StandardCharsets;
+import java.sql.SQLException;
 import java.time.LocalDate;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -67,6 +68,9 @@ public class AICallbackController {
 
     /** 幂等返回的业务码（规范 8.1 示例：6001 = 任务已处理） */
     private static final String DUPLICATE_MESSAGE = "任务已处理（幂等返回）";
+
+    /** MySQL 唯一键冲突错误码（ER_DUP_ENTRY）：用于把「重复回调」与其它约束错误区分开 */
+    private static final int MYSQL_ER_DUP_ENTRY = 1062;
 
     private final HmacSignatureVerifier signatureVerifier;
     private final ObjectMapper objectMapper;
@@ -161,9 +165,38 @@ public class AICallbackController {
             return Result.ok("周计划已接收", data);
         } catch (DataIntegrityViolationException e) {
             // ---- 防线 4：DB 唯一索引兜底（Redis 锁失效/Redis 不可用时的最后一道）----
-            log.warn("并发回调撞唯一索引，按已处理返回: taskId={}", req.getTaskId(), e);
+            //
+            // ⚠️ 这里**不能**把所有 DataIntegrityViolationException 都当成「已处理」：
+            // 该异常同时覆盖字段过长(1406)、数值越界(1264)、NOT NULL(1048) 等约束问题。
+            // 若不区分，一个 taskId 超长导致的写库失败会被上报成「6001 任务已处理」，
+            // Python 侧视为成功而 ACK —— AI 建议就此静默丢失，且永远不会重试。
+            if (!isDuplicateTaskId(e)) {
+                log.error("回调写库失败（非唯一键冲突，不按幂等处理）: taskId={}, cause={}",
+                        req.getTaskId(), e.getMostSpecificCause().getMessage());
+                throw new BusinessException(ErrorCode.SYSTEM_ERROR,
+                        "周计划回调落库失败：" + e.getMostSpecificCause().getMessage());
+            }
+            log.info("并发回调撞 uk_task_id，按已处理返回: taskId={}", req.getTaskId());
             throw new BusinessException(ErrorCode.AI_TIMEOUT.getCode(), DUPLICATE_MESSAGE);
         }
+    }
+
+    /**
+     * 判断这次约束冲突是否就是 {@code uk_task_id} 的唯一键冲突
+     * <p>
+     * 只看异常类型是不够的（见上面调用处的说明）。MySQL 的唯一键冲突错误码是
+     * <b>1062 ER_DUP_ENTRY</b>，且消息里会带上索引名，因此两个条件同时满足才认。
+     * <p>
+     * 判定失败时的方向是**故意保守**的：宁可把重复回调误判成真错误（Python 会重试、
+     * 最终进死信队列，人能看到），也不能把真错误误判成重复回调（静默丢数据、无人知晓）。
+     */
+    private boolean isDuplicateTaskId(DataIntegrityViolationException e) {
+        Throwable cause = e.getMostSpecificCause();
+        if (cause instanceof SQLException sqlException && sqlException.getErrorCode() == MYSQL_ER_DUP_ENTRY) {
+            String message = sqlException.getMessage() == null ? "" : sqlException.getMessage();
+            return message.contains("uk_task_id");
+        }
+        return false;
     }
 
     /** 入参校验：缺字段或格式不对时给 9003，避免写进半条脏数据 */

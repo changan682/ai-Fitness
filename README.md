@@ -116,7 +116,7 @@ agent2/
 │   ├── app/                      # 路由 / Agent / LLM / 多模态 / Milvus / MQ 消费者
 │   ├── data/seed_knowledge.json  # 知识库种子数据（200 条，5 大分类）
 │   ├── scripts/                  # Key 探活、入库工具、端到端验收脚本
-│   ├── tests/                    # pytest（392 项）
+│   ├── tests/                    # pytest（401 项）
 │   ├── Dockerfile                # Python 生产镜像
 │   └── docker-entrypoint.sh      # 等 Milvus 就绪后再起 FastAPI
 ├── fitness-frontend/             # React + TypeScript 前端（第 8 周）
@@ -243,7 +243,7 @@ npm run dev            # http://localhost:5173
 # Java：206 项（含「实体 ↔ init.sql 列名契约」测试）
 mvn test
 
-# Python：392 项（不联网）
+# Python：401 项（不联网）
 cd python-agent; E:\Anaconde\python.exe -m pytest tests -q
 
 # 前端：严格模式类型检查 + 单元/渲染测试 + 生产构建
@@ -255,9 +255,11 @@ cd fitness-frontend; npm run typecheck; npm test; npm run build
 | 脚本 | 验证内容 | 前置 |
 |:---|:---|:---|
 | `scripts/check_api_keys.py` | 大模型 / Embedding / 多模态 Key 三项探活 | 联网 |
+| `scripts/verify_real_ai.py` | 真实 AI 链路（真实 Embedding 检索质量 + 真实总结），26 项 | Python + Redis |
 | `scripts/verify_pose_multimodal.py` | 姿态评估真实多模态（可传自己的照片 `--image`） | 百炼 Key |
-| `scripts/verify_summary_layers.py` | AI 总结双层缓存与变更失效 | Python + Redis |
+| `scripts/verify_summary_layers.py` | AI 总结双层缓存与变更失效 | Java + Redis |
 | `scripts/verify_java_ai_endpoints.py` | Java 5 个 `/api/ai/*` 接口 | Java + Python |
+| `scripts/smoke_test.py` | Python 6 个接口 + 4 条错误路径（31 项） | Python |
 | `scripts/ingest_knowledge.py --stats` | 知识库统计与索引参数一致性 | Milvus |
 | `scripts/verify_weekly_plan_chain.py` | **每周复盘异步全链路**（发送→消费→回调→验签→落库） | Java + RabbitMQ |
 
