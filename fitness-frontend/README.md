@@ -39,7 +39,7 @@ Vite 只做代理，不会替你启动后端。
 
 ```powershell
 npm run typecheck    # tsc --noEmit（严格模式）
-npm test             # vitest run：页面渲染冒烟 + 拦截器逻辑（21 项，不依赖后端）
+npm test             # vitest run：页面渲染冒烟 + 拦截器逻辑（23 项，不依赖后端）
 npm run build        # 先 tsc 再 vite build，产物在 dist/
 npm run preview      # 预览构建产物（4173）
 ```
@@ -167,11 +167,12 @@ Profile 页面把这两件事拆成两个互不影响的表单。
 npm test        # vitest run（jsdom，不依赖后端，可进 CI）
 ```
 
-两层，共 **21 项**：
+两层，共 **23 项**：
 
 | 层 | 文件 | 覆盖 |
 |:---|:---|:---|
 | **页面渲染冒烟** | `src/pages/pages.render.test.tsx` | 5 个页面 + 404 在 jsdom 里真实挂载并渲染出关键内容；`ErrorBoundary` 兜住渲染期异常（不是白屏）；`ProtectedRoute` 在已登录/未登录两种状态下分别放行与重定向 |
+| **AI 标记的界面可见性** | `src/pages/pages.render.test.tsx` | 降级回答必须**看得见**：「内置知识条目」兜底时显示「降级回答」与原因、分数标为「合成分数」；真实 RAG 时不得出现任何降级标记 |
 | **拦截器逻辑** | `src/api/client.test.ts` | 信封拆解；错误码分级（9001 清态跳登录并**去抖**、9002/9003 与未知码的提示方式、1002/6001 **静默**）；断网/超时/5xx 三种网络错误的文案 |
 
 **为什么必须有渲染冒烟测试**：`tsc` 只证明类型对、`vite build` 只证明模块能打包，

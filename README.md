@@ -111,7 +111,7 @@ agent2/
 │   ├── cache/                    # 缓存封装、锁、Token 黑名单
 │   ├── task/                     # 定时任务 + 死信队列监控
 │   └── util/                     # JWT、HMAC 验签、图片压缩
-├── src/test/java/com/fitness/    # Java 测试（206 项）
+├── src/test/java/com/fitness/    # Java 测试（208 项）
 ├── python-agent/                 # Python AI 服务（详见其 README）
 │   ├── app/                      # 路由 / Agent / LLM / 多模态 / Milvus / MQ 消费者
 │   ├── data/seed_knowledge.json  # 知识库种子数据（200 条，5 大分类）
@@ -240,7 +240,7 @@ npm run dev            # http://localhost:5173
 ## 七、测试与验收
 
 ```powershell
-# Java：206 项（含「实体 ↔ init.sql 列名契约」测试）
+# Java：208 项（含「实体 ↔ init.sql 列名契约」测试）
 mvn test
 
 # Python：401 项（不联网）
