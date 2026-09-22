@@ -60,7 +60,12 @@ export default function AppLayout() {
     <div className="flex h-full flex-col">
       {/* 顶部：头像 + 昵称（数据来自 userStore，登录接口只给了精简信息） */}
       <div className="flex items-center gap-3 px-4 py-4">
-        <Avatar icon={<UserOutlined />} className="shrink-0 bg-blue-500" />
+        <Avatar
+          // 有头像就用（URL 已带版本号，换头像后自动破缓存）；没有则回退默认图标
+          src={user?.avatarUrl ?? undefined}
+          icon={<UserOutlined />}
+          className={user?.avatarUrl ? 'shrink-0' : 'shrink-0 bg-blue-500'}
+        />
         {!(collapsed && !isMobile) && (
           <div className="min-w-0">
             <div className="truncate text-sm font-medium">

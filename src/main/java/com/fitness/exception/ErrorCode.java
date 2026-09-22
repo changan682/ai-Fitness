@@ -24,6 +24,8 @@ public enum ErrorCode {
     PHONE_REGISTERED(1001, "该手机号已注册"),
     PASSWORD_ERROR(1002, "密码错误"),
     USER_NOT_FOUND(1003, "用户不存在"),
+    /** 头像为空 / 超过 2MB / 非 JPG·PNG / 文件已损坏 —— 统一归为「上传的图片不合法」 */
+    AVATAR_INVALID(1004, "头像格式或大小不合法"),
 
     // ==================== 训练记录模块 2001-2099 ====================
     TRAINING_RECORD_NOT_FOUND(2001, "训练记录不存在"),

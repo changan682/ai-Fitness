@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS t_user (
     weight          DECIMAL(5,1)                    COMMENT '体重(kg)',
     training_goal   VARCHAR(20)     DEFAULT '保持'  COMMENT '训练目标：增肌/减脂/保持',
     training_level  VARCHAR(10)     DEFAULT '新手'  COMMENT '训练年限：新手/进阶/老手',
+    avatar_url      VARCHAR(255)                    COMMENT '头像访问路径（含版本号，为空表示未设置）',
     injury_record   TEXT                            COMMENT '伤病记录（JSON数组字符串）',
     phone           VARCHAR(20)     NOT NULL        COMMENT '手机号',
     password        VARCHAR(255)    NOT NULL        COMMENT '密码（BCrypt加密）',

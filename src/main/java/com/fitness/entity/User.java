@@ -60,6 +60,19 @@ public class User {
     @Column(length = 10, columnDefinition = "VARCHAR(10) DEFAULT '新手'")
     private String trainingLevel;
 
+    /**
+     * 头像访问路径（含 cache-busting 版本号），为空表示未设置
+     * <p>
+     * 显式写 {@code name = "avatar_url"}：本项目有过一次 P0 —— 靠命名策略推导列名时
+     * {@code caloriesPer100g → calories_per_100g} 这类列推导错位，导致 JPA 在启动时
+     * 拿错误的物理列名去查询。列名写死 + {@code EntityDdlContractTest} 契约测试双保险。
+     * <p>
+     * 存的是**路径**而不是文件内容：图片落盘在 {@code app.avatar.dir} 下，
+     * 数据库里只留一个可缓存的 URL（详见 {@code AvatarStorageService}）。
+     */
+    @Column(name = "avatar_url", length = 255)
+    private String avatarUrl;
+
     /** 伤病记录（JSON数组字符串） */
     @Column(columnDefinition = "TEXT")
     private String injuryRecord;

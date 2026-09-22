@@ -20,6 +20,15 @@ export interface UserProfile {
   weight: number | null
   trainingGoal: TrainingGoal | string | null
   trainingLevel: TrainingLevel | string | null
+  /**
+   * 头像访问路径，如 `/api/v1/user/avatar/12?v=1789999999999`
+   * <p>
+   * 为空表示未设置头像 → 界面回退到默认图标。该路径**无需鉴权**即可访问
+   * （已加入 JWT 白名单），因此可以直接放进 `<img src>`：浏览器给图片请求
+   * 不会带 `Authorization` 头，若要求鉴权就会表现为"头像永远不显示"。
+   * 末尾的 `v` 是版本号，换头像后会变，用来破浏览器缓存。
+   */
+  avatarUrl: string | null
   /** 伤病记录（后端以 JSON 数组字符串存储，接口层已转成数组） */
   injuryRecord: string[]
   /** 脱敏手机号，如 138****8000 */
@@ -66,6 +75,14 @@ export interface UserBrief {
   nickname: string
   gender: number | null
   trainingGoal: string | null
+  /** 头像访问路径（可空）；顶栏直接用它渲染，省掉一次档案请求 */
+  avatarUrl?: string | null
+}
+
+/** 头像上传响应 */
+export interface AvatarUploadResponse {
+  /** 形如 `/api/v1/user/avatar/12?v=1789999999999`（已带破缓存的版本号） */
+  avatarUrl: string
 }
 
 /** 登录响应 */

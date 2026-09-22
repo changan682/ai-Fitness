@@ -141,6 +141,16 @@ ai:
 callback:
   hmac-secret: ${HMAC_SECRET:shared-secret-key}
 
+# --- 头像存储（体验优化批次 B） ---
+app:
+  avatar:
+    # 头像文件目录（相对项目根目录，已加入 .gitignore）
+    dir: ${AVATAR_DIR:./data/avatars}
+    # 上传允许的原始大小上限 2MB；落盘目标 300KB / 最长边 256px
+    max-upload-bytes: 2097152
+    max-stored-bytes: 307200
+    max-edge: 256
+
 # --- 周计划异步链路 ---
 fitness:
   weekly-plan:

@@ -24,5 +24,8 @@ public class LoginResponse {
         private String nickname;
         private Integer gender;
         private String trainingGoal;
+
+        /** 头像访问路径（可空）；前端顶栏直接用它渲染 <img src>，省掉一次档案请求 */
+        private String avatarUrl;
     }
 }

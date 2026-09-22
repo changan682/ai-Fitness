@@ -8,13 +8,22 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.CacheControl;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.time.Duration;
 
 /**
- * 用户模块 Controller — /api/v1/user/*（7个接口）
+ * 用户模块 Controller — /api/v1/user/*（9个接口）
  * <p>
  * 成功响应中的 msg 文案按接口清单逐条对齐（规范里对多数接口指定了业务化提示语，
  * 前端直接展示 msg，因此不能统一返回 "success"）。
+ * <p>
+ * 其中 1.8 上传头像 / 1.9 读取头像是体验优化批次新增（规范接口清单之外），
+ * 读取接口无鉴权，理由见方法注释。
  */
 @Slf4j
 @RestController
@@ -72,5 +81,43 @@ public class UserController extends BaseController {
     public Result<RefreshTokenResponse> refreshToken(HttpServletRequest request) {
         RefreshTokenResponse response = userService.refreshToken(getUserId(request), getToken(request));
         return Result.ok("Token已刷新", response);
+    }
+
+    // ==================== 头像（1.8 / 1.9，体验优化批次 B） ====================
+
+    /**
+     * 1.8 上传/更换头像 — multipart，字段名 {@code file}
+     * <p>
+     * 校验（大小/魔数/真实解码）与压缩在 {@code AvatarStorageService} 里做，
+     * 这里只负责把当前登录用户的 id 传进去 —— 用户 id **只从 Token 取**，
+     * 不接受请求体里传 userId（否则任何人都能改别人的头像）。
+     */
+    @PostMapping(value = "/avatar", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public Result<AvatarUploadResponse> uploadAvatar(HttpServletRequest request,
+                                                     @RequestPart("file") MultipartFile file) {
+        return Result.ok("头像已更新", userService.uploadAvatar(getUserId(request), file));
+    }
+
+    /**
+     * 1.9 读取头像 — 返回图片字节流，不是 JSON 信封
+     * <p>
+     * <b>这个接口在 JWT 白名单里</b>：浏览器给 {@code <img src>} 发请求时不会带
+     * {@code Authorization} 头，不放行就会表现为"头像永远不显示（401）"。
+     * 安全性由"只暴露头像字节、不含任何隐私字段"承担，且路径里的 userId 必须与
+     * 库里记录一致才会返回文件（见 {@code AvatarStorageService#pathOf}）。
+     * <p>
+     * 未设置头像 → 404（而不是返回一张默认图：前端用图标兜底更清晰）。
+     */
+    @GetMapping("/avatar/{userId}")
+    public ResponseEntity<byte[]> getAvatar(@PathVariable Long userId) {
+        byte[] bytes = userService.loadAvatar(userId);
+        if (bytes == null || bytes.length == 0) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok()
+                .contentType(MediaType.IMAGE_JPEG)
+                // 头像 URL 带版本号（?v=epoch），可以放心让浏览器长期缓存
+                .cacheControl(CacheControl.maxAge(Duration.ofDays(1)).cachePublic())
+                .body(bytes);
     }
 }

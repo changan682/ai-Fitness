@@ -136,6 +136,7 @@ vi.mock('@/api/userApi', () => ({
         weight: 70,
         trainingGoal: '增肌',
         trainingLevel: '新手',
+        avatarUrl: null,
         injuryRecord: [],
         phone: '138****8000',
         createdAt: '2026-09-20 16:00:00',
@@ -147,6 +148,7 @@ vi.mock('@/api/userApi', () => ({
     register: vi.fn(),
     logout: vi.fn(),
     refresh: vi.fn(),
+    uploadAvatar: vi.fn(),
   },
 }))
 
@@ -345,6 +347,93 @@ describe('路由守卫', () => {
     expect(await screen.findByText('受保护内容')).toBeInTheDocument()
     expect(screen.queryByText('登录页占位')).not.toBeInTheDocument()
   })
+})
+
+// ==================== 头像（批次 B） ====================
+
+describe('头像自定义', () => {
+  // 模块级 mock 的实现会跨用例累积调用次数，这里清一下调用记录
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('档案页提供"更换头像"入口（此前完全没有这个功能）', async () => {
+    const { container } = renderWithProviders(<ProfilePage />)
+
+    await screen.findByText('测试用户')
+    // 可点的 file input + 头像上的「更换头像」提示，两者缺一用户就不知道头像能换
+    // （不断言 Tooltip 文案：antd 的 Tooltip 只在 hover 后才进 DOM）
+    expect(container.querySelector('input[type="file"]')).not.toBeNull()
+    expect(screen.getByText('更换头像')).toBeInTheDocument()
+    // accept 限定只让 JPG/PNG 进入选择框，浏览器层面就先挡一道
+    expect(container.querySelector('input[type="file"]')).toHaveAttribute(
+      'accept',
+      'image/jpeg,image/png',
+    )
+  })
+
+  it('选中图片后调用上传接口，并把文件原样交给它', async () => {
+    const userApi = (await import('@/api/userApi')).default
+    vi.mocked(userApi.uploadAvatar).mockResolvedValue({
+      avatarUrl: '/api/v1/user/avatar/1?v=1789999999999',
+    })
+
+    const { container } = renderWithProviders(<ProfilePage />)
+    await screen.findByText('测试用户')
+
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement
+    await userEvent.upload(input, new File(['x'], 'a.png', { type: 'image/png' }))
+
+    // beforeUpload 返回 false → antd 不会自己发请求，必须由我们的 mutation 发出去
+    await waitFor(() => expect(userApi.uploadAvatar).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(userApi.uploadAvatar).mock.calls[0][0]).toMatchObject({ name: 'a.png' })
+  })
+
+  it('超过 2MB 的图片在前端就被拦下，不发请求（服务端仍会独立校验一遍）', async () => {
+    const userApi = (await import('@/api/userApi')).default
+
+    const { container } = renderWithProviders(<ProfilePage />)
+    await screen.findByText('测试用户')
+
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement
+    // 注意：类型不合法（如 gif）的用例在这里模拟不出来 —— `accept` 属性会让
+    // userEvent/browser 直接把文件过滤掉，永远走不到 beforeUpload。所以这里测大小上限。
+    const tooBig = new File([new Uint8Array(2 * 1024 * 1024 + 1)], 'big.png', {
+      type: 'image/png',
+    })
+    await userEvent.upload(input, tooBig)
+
+    await waitFor(() =>
+      expect(screen.getByText('头像最大 2MB，请压缩后再上传')).toBeInTheDocument(),
+    )
+    expect(userApi.uploadAvatar).not.toHaveBeenCalled()
+  })
+
+  it('档案同步到登录态时带上 avatarUrl（否则刷新页面后顶栏头像会丢）', async () => {
+    const { useUserStore } = await import('@/store')
+    const url = '/api/v1/user/avatar/1?v=1789999999999'
+
+    useUserStore.getState().syncFromProfile({
+      id: 1,
+      nickname: '测试用户',
+      gender: 1,
+      birthDate: null,
+      height: 175,
+      weight: 70,
+      trainingGoal: '增肌',
+      trainingLevel: '新手',
+      avatarUrl: url,
+      injuryRecord: [],
+      phone: '138****8000',
+      createdAt: '2026-09-20 16:00:00',
+    })
+
+    expect(useUserStore.getState().user?.avatarUrl).toBe(url)
+  })
+
+  // 说明：这里不断言页面上的 <img src>。antd 的 Avatar 只在图片 onLoad 之后才渲染 <img>，
+  // 而 jsdom 不加载图片资源 —— 断言它只会写出一条永远"通过"或永远"失败"的假用例。
+  // 真正要守的两件事分别在「上传接口被调用」与「store 带上 avatarUrl」两个用例里。
 })
 
 // ==================== 降级 / 模拟标记在界面上的可见性 ====================

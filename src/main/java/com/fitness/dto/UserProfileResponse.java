@@ -29,6 +29,14 @@ public class UserProfileResponse {
     private String trainingGoal;
     private String trainingLevel;
 
+    /**
+     * 头像访问路径（形如 {@code /api/v1/user/avatar/12?v=1789999999999}）
+     * <p>
+     * 为空表示未设置头像，前端应回退到默认图标；该路径已加入 JWT 白名单，
+     * 因此可以直接放进 {@code <img src>}（浏览器不会给图片请求带 Authorization 头）。
+     */
+    private String avatarUrl;
+
     /** 伤病记录数组，如 ["左肩旧伤"]（规范 1.3 要求为数组而非字符串） */
     private List<String> injuryRecord;
 

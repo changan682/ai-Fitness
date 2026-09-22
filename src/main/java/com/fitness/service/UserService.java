@@ -19,6 +19,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -50,6 +51,7 @@ public class UserService {
     private final RedisCacheService redisCacheService;
     private final TokenBlacklistService tokenBlacklistService;
     private final ObjectMapper objectMapper;
+    private final AvatarStorageService avatarStorageService;
 
     // ==================== 注册 ====================
 
@@ -144,6 +146,58 @@ public class UserService {
         redisCacheService.expireWithJitter(cacheKey, CacheKeys.USER_PROFILE_TTL_SECONDS);
         log.debug("用户档案缓存写入: userId={}", userId);
         return response;
+    }
+
+    // ==================== 头像 ====================
+
+    /**
+     * 上传/更换头像
+     *
+     * <h3>顺序为什么是「先写新文件 → 再改库 → 最后删旧文件」</h3>
+     * 三步都可能失败，顺序决定了失败后的状态：
+     * <ol>
+     *   <li>写文件失败 → 库没动，用户仍是旧头像（可重试）；</li>
+     *   <li>改库失败 → 回滚时顺手删掉刚写的新文件，不留孤儿；</li>
+     *   <li>删旧文件失败 → 只留一个用不到的文件，用户已经用上新头像（只记日志）。</li>
+     * </ol>
+     * 反过来先删旧文件的话，中途失败就是"头像没了但新头像也没换上"。
+     */
+    @Transactional
+    public AvatarUploadResponse uploadAvatar(Long userId, MultipartFile file) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new BusinessException(ErrorCode.USER_NOT_FOUND));
+
+        String oldUrl = user.getAvatarUrl();
+        String newUrl = avatarStorageService.store(userId, file);
+
+        try {
+            user.setAvatarUrl(newUrl);
+            userRepository.saveAndFlush(user);
+        } catch (RuntimeException e) {
+            avatarStorageService.deleteQuietly(userId, newUrl);
+            throw e;
+        }
+
+        // 档案响应被缓存（Redis Hash，TTL 30 分钟）：不失效的话前端拿到的还是旧 avatarUrl
+        evictProfileCacheAfterCommit(userId);
+
+        if (oldUrl != null && !oldUrl.equals(newUrl)) {
+            avatarStorageService.deleteQuietly(userId, oldUrl);
+        }
+        return AvatarUploadResponse.builder().avatarUrl(newUrl).build();
+    }
+
+    /**
+     * 读取头像字节 — 走 DB 里记录的路径，不接受调用方指定文件
+     *
+     * @return 未设置头像或文件已丢失时返回 {@code null}（Controller 转 404）
+     */
+    public byte[] loadAvatar(Long userId) {
+        User user = userRepository.findById(userId).orElse(null);
+        if (user == null) {
+            return null;
+        }
+        return avatarStorageService.load(userId, user.getAvatarUrl());
     }
 
     // ==================== 档案修改 ====================
@@ -303,6 +357,7 @@ public class UserService {
                 .weight(user.getWeight())
                 .trainingGoal(user.getTrainingGoal())
                 .trainingLevel(user.getTrainingLevel())
+                .avatarUrl(user.getAvatarUrl())
                 .injuryRecord(parseInjuryRecord(user.getInjuryRecord()))
                 .phone(maskPhone(user.getPhone()))
                 .createdAt(user.getCreatedAt())
@@ -315,6 +370,8 @@ public class UserService {
                 .nickname(user.getNickname())
                 .gender(user.getGender())
                 .trainingGoal(user.getTrainingGoal())
+                // 登录响应里带上头像：前端顶栏直接就能渲染，不必再发一次档案请求
+                .avatarUrl(user.getAvatarUrl())
                 .build();
     }
 

@@ -106,6 +106,8 @@ export const useUserStore = create<UserState>((set, get) => ({
       nickname: profile.nickname,
       gender: profile.gender,
       trainingGoal: profile.trainingGoal,
+      // 头像也要带上：否则改完头像刷新页面，顶栏又从默认图标变回"没换过"的样子
+      avatarUrl: profile.avatarUrl,
     }
     set({ user: brief })
     saveUser(brief, Boolean(readToken()))

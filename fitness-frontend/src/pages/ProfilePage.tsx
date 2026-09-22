@@ -1,4 +1,4 @@
-import { EditOutlined, UserOutlined } from '@ant-design/icons'
+import { EditOutlined, LoadingOutlined, UserOutlined } from '@ant-design/icons'
 import {
   App,
   Avatar,
@@ -16,6 +16,7 @@ import {
   Skeleton,
   Space,
   Tooltip,
+  Upload,
 } from 'antd'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import dayjs, { type Dayjs } from 'dayjs'
@@ -160,6 +161,48 @@ export default function ProfilePage() {
     },
   })
 
+  // ==================== 上传头像 ====================
+
+  /** 前端只做体验层校验（大文件/明显不是图片先拦下来，省一次往返），真正的校验在服务端 */
+  const AVATAR_MAX_BYTES = 2 * 1024 * 1024
+  const AVATAR_TYPES = ['image/jpeg', 'image/png']
+
+  const uploadAvatarMutation = useMutation({
+    mutationFn: (file: File) => userApi.uploadAvatar(file),
+
+    onSuccess: async (data) => {
+      message.success('头像已更新')
+      // 左栏头像读的是档案里的 avatarUrl：更新 store 让顶栏立刻换图，
+      // 再 invalidate 档案查询让左栏拿到权威值（后端已顺带失效 Redis 档案缓存）
+      const current = useUserStore.getState().user
+      if (current) {
+        useUserStore.getState().setUser({ ...current, avatarUrl: data.avatarUrl })
+      }
+      await queryClient.invalidateQueries({ queryKey: PROFILE_KEY })
+    },
+
+    onError: (error: unknown) => {
+      // 1004（格式/大小不合法）不在拦截器的静默名单里，会由拦截器弹提示；
+      // 这里只兜底非 ApiError 的情况，避免同一错误弹两次
+      if (!(error instanceof ApiError)) {
+        message.error('头像上传失败，请稍后重试')
+      }
+    },
+  })
+
+  const handleAvatarSelected = (file: File): boolean => {
+    if (!AVATAR_TYPES.includes(file.type)) {
+      message.error('头像仅支持 JPG / PNG 格式')
+      return false
+    }
+    if (file.size > AVATAR_MAX_BYTES) {
+      message.error('头像最大 2MB，请压缩后再上传')
+      return false
+    }
+    uploadAvatarMutation.mutate(file)
+    return false // 返回 false 阻止 antd 自己发上传请求，统一走我们封装的 axios 实例
+  }
+
   // ==================== 体测录入 ====================
 
   const addMetricMutation = useMutation({
@@ -233,7 +276,31 @@ export default function ProfilePage() {
             {profileQuery.isLoading ? (
               <Skeleton.Avatar active size={80} shape="circle" />
             ) : (
-              <Avatar size={80} icon={<UserOutlined />} style={{ backgroundColor: '#1677ff' }} />
+              <Upload
+                accept="image/jpeg,image/png"
+                showUploadList={false}
+                beforeUpload={handleAvatarSelected}
+                disabled={uploadAvatarMutation.isPending}
+              >
+                <Tooltip title="点击更换头像（JPG/PNG，≤2MB）">
+                  <div className="relative cursor-pointer">
+                    <Avatar
+                      size={80}
+                      src={profile?.avatarUrl ?? undefined}
+                      icon={<UserOutlined />}
+                      style={profile?.avatarUrl ? undefined : { backgroundColor: '#1677ff' }}
+                    />
+                    {/* 悬停高亮：不做的话用户不知道这个圆圈可以点 */}
+                    <div className="absolute inset-0 flex items-center justify-center rounded-full bg-black/45 text-white opacity-0 transition-opacity hover:opacity-100">
+                      {uploadAvatarMutation.isPending ? (
+                        <LoadingOutlined />
+                      ) : (
+                        <span className="text-xs">更换头像</span>
+                      )}
+                    </div>
+                  </div>
+                </Tooltip>
+              </Upload>
             )}
 
             <div className="mt-3">

@@ -32,6 +32,7 @@ export type {
   LoginRequest,
   LoginResponse,
   UserBrief,
+  AvatarUploadResponse,
   UpdateProfileRequest,
   ChangePasswordRequest,
   RefreshTokenResponse,
