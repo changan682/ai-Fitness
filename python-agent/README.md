@@ -50,7 +50,7 @@ python-agent/
 │   ├── verify_pose_multimodal.py  # 姿态评估真实多模态端到端验证（10 项）
 │   ├── verify_weekly_plan_chain.py# 每周复盘异步链路：发送→消费→回调→验签（11 项）
 │   ├── verify_summary_layers.py   # AI 总结双层缓存/同部位对比/变更失效（12 项）
-│   ├── verify_java_ai_endpoints.py# Java /api/ai/* 五接口端到端（27 项，含 multipart）
+│   ├── verify_java_ai_endpoints.py# Java /api/ai/* 六接口端到端（含 multipart 与批次 D 的问询）
 │   └── _test_image.py             # 验收脚本共用的测试图片（宽高须 >10px，见模块注释）
 ├── tests/                    # pytest（426 项）
 ├── Dockerfile                # 生产镜像（python:3.12-slim）
@@ -361,7 +361,7 @@ E:\Anaconde\python.exe scripts/verify_pose_multimodal.py
 # 3. 接口冒烟（6 个正常路径 + 4 个错误路径，共 31 项断言）
 E:\Anaconde\python.exe scripts/smoke_test.py --base-url http://127.0.0.1:8000
 
-# 4. Java /api/ai/* 五个接口端到端（27 项，含 multipart 图片上传）
+# 4. Java /api/ai/* 六个接口端到端（含 multipart 图片上传与批次 D 的身体状态问询）
 E:\Anaconde\python.exe scripts/verify_java_ai_endpoints.py
 
 # 5. AI 总结的双层缓存 / 同部位对比 / 变更失效（12 项）

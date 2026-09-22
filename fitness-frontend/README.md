@@ -39,7 +39,7 @@ Vite 只做代理，不会替你启动后端。
 
 ```powershell
 npm run typecheck    # tsc --noEmit（严格模式）
-npm test             # vitest run：页面渲染冒烟 + 拦截器逻辑（23 项，不依赖后端）
+npm test             # vitest run：页面渲染冒烟 + AI 标记可见性 + 头像/记忆/问询交互（36 项，不依赖后端）
 npm run build        # 先 tsc 再 vite build，产物在 dist/
 npm run preview      # 预览构建产物（4173）
 ```
@@ -167,12 +167,13 @@ Profile 页面把这两件事拆成两个互不影响的表单。
 npm test        # vitest run（jsdom，不依赖后端，可进 CI）
 ```
 
-两层，共 **23 项**：
+三层，共 **36 项**：
 
 | 层 | 文件 | 覆盖 |
 |:---|:---|:---|
 | **页面渲染冒烟** | `src/pages/pages.render.test.tsx` | 5 个页面 + 404 在 jsdom 里真实挂载并渲染出关键内容；`ErrorBoundary` 兜住渲染期异常（不是白屏）；`ProtectedRoute` 在已登录/未登录两种状态下分别放行与重定向 |
-| **AI 标记的界面可见性** | `src/pages/pages.render.test.tsx` | 降级回答必须**看得见**：「内置知识条目」兜底时显示「降级回答」与原因、分数标为「合成分数」；真实 RAG 时不得出现任何降级标记 |
+| **AI 标记的界面可见性** | `src/pages/pages.render.test.tsx` | 降级回答必须**看得见**：「内置知识条目」兜底时显示「降级回答」与原因、分数标为「合成分数」；真实 RAG 时不得出现任何降级标记；知识库未覆盖时显示「通用知识回答（未使用知识库）」且不展示来源 |
+| **交互功能（头像 / 记忆 / 身体状态问询）** | `src/pages/pages.render.test.tsx` | 头像入口存在且选中文件后真的调用上传接口、超 2MB 被前端拦下、`syncFromProfile` 带上 `avatarUrl`；每轮问答都把 `sessionId` 带回（漏带 = 失忆）、「新对话」清空气泡并通知后端清会话；身体状态问询点击才请求、`rule_based` 显示「规则生成（未使用大模型）」、high 级风险可见、真实 LLM 路径不出现降级提示 |
 | **拦截器逻辑** | `src/api/client.test.ts` | 信封拆解；错误码分级（9001 清态跳登录并**去抖**、9002/9003 与未知码的提示方式、1002/6001 **静默**）；断网/超时/5xx 三种网络错误的文案 |
 
 **为什么必须有渲染冒烟测试**：`tsc` 只证明类型对、`vite build` 只证明模块能打包，

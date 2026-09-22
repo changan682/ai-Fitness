@@ -112,7 +112,7 @@ agent2/
 │   ├── cache/                    # 缓存封装、锁、Token 黑名单
 │   ├── task/                     # 定时任务 + 死信队列监控
 │   └── util/                     # JWT、HMAC 验签、图片压缩
-├── src/test/java/com/fitness/    # Java 测试（208 项）
+├── src/test/java/com/fitness/    # Java 测试（249 项）
 ├── python-agent/                 # Python AI 服务（详见其 README）
 │   ├── app/                      # 路由 / Agent / LLM / 多模态 / Milvus / MQ 消费者
 │   ├── data/seed_knowledge.json  # 知识库种子数据（200 条，5 大分类）
@@ -249,13 +249,13 @@ npm run dev            # http://localhost:5173
 ## 七、测试与验收
 
 ```powershell
-# Java：208 项（含「实体 ↔ init.sql 列名契约」测试）
+# Java：249 项（含「实体 ↔ init.sql 列名契约」「JWT 白名单配置」测试）
 mvn test
 
-# Python：401 项（不联网）
+# Python：426 项（不联网）
 cd python-agent; E:\Anaconde\python.exe -m pytest tests -q
 
-# 前端：严格模式类型检查 + 单元/渲染测试 + 生产构建
+# 前端：36 项（严格模式类型检查 + 单元/渲染测试 + 生产构建）
 cd fitness-frontend; npm run typecheck; npm test; npm run build
 ```
 
@@ -284,6 +284,7 @@ cd fitness-frontend; npm run typecheck; npm test; npm run build
 | 第 6 周 | 真实多模态姿态评估 + 动作推荐接 LLM + 知识入库工具 | ✅ |
 | 第 7 周 | RabbitMQ 异步闭环：发送 → 消费 → LLM → 回调 → 验签落库 | ✅ |
 | 第 8 周 | React+TS 前端（5 个页面 / 33 个接口联调）+ Docker Compose 编排 + 文档收尾 | ✅ |
+| 体验优化 | **头像自定义**、**问答四层降级（知识库没覆盖 → 通用知识并标注）**、**多轮对话记忆**、**身体状态主动问询** | ✅ 详见 `优化计划书-头像与AI对话增强.md` |
 
 ---
 
