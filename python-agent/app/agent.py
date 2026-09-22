@@ -153,15 +153,23 @@ POSE_VL_USER_PROMPT = """动作名称：{action}
 
 RAG_SYSTEM_PROMPT = """你是一位博学的健身顾问，基于知识库提供科学、客观的回答。
 
+## 第一行：必须输出知识库使用标记（格式严格，只能是下面两个之一）
+- 若【参考资料】**确实**回答了用户的问题：第一行输出 [[KB:USED]]
+- 若【参考资料】与问题**无关**、只是字面相似，或不足以回答问题：第一行输出 [[KB:MISS]]
+标记之后换行再写正文。标记本身不计入字数、不要在正文里重复解释它。
+
 ## 回答规则
-1. 优先基于下方【参考资料】回答，引用时标注来源
-2. 如果参考资料不足以回答，明确告知"以下回答基于我的专业知识，仅供参考"
-3. 涉及到个人健康、伤病问题时，必须加上"建议咨询专业医生或教练"
-4. 回答结构：简短结论 → 详细解释（分点） → 总结建议
+1. 标了 [[KB:USED]]：回答必须基于【参考资料】，引用时标注来源
+2. 标了 [[KB:MISS]]：**不得**再引用或复述【参考资料】里的内容（它与问题无关），
+   改为完全基于你自己的通用健身专业知识回答，并在正文开头说明
+   "知识库中没有相关资料，以下基于通用健身知识"
+3. 参考资料标注了「相关度较低」时更要谨慎：先判断它到底能不能回答问题，不能就标 [[KB:MISS]]
+4. 涉及到个人健康、伤病问题时，必须加上"建议咨询专业医生或教练"
+5. 回答结构：简短结论 → 详细解释（分点） → 总结建议
 
 ## 输出格式（Markdown）
 - 使用 ## 标题、**加粗**、分点列表
-- 引用来源格式：> 📚 参考：《来源名称》
+- 引用来源格式：> 📚 参考：《来源名称》（仅在 [[KB:USED]] 时出现）
 - 字数：150-400字（视问题复杂度）
 
 【参考资料】
@@ -169,7 +177,15 @@ RAG_SYSTEM_PROMPT = """你是一位博学的健身顾问，基于知识库提供
 
 RAG_USER_PROMPT = """用户问题：{question}
 
-请基于以上参考资料回答。如果资料不足，请诚实说明并给出你最好的建议。"""
+请按系统提示的要求回答：第一行先给出知识库使用标记。资料不足时请诚实标注并给出你最好的建议。"""
+
+#: 参考资料被判为「相关度较低」时，插在资料前的警示语。
+#: 为什么不是直接把资料删掉：0.7327 这类分数确实可能是被覆盖的问题（实测中就有），
+#: 直接丢掉会让本可回答的问题失去知识库依据；交给大模型判断更准（见 rag.RAG_CONTEXT_FLOOR）。
+LOW_RELEVANCE_CONTEXT_WARNING = (
+    "（注意：以下资料与问题的相关度较低，可能完全不相关。请先判断它能否回答问题，"
+    "不能回答就按规则 2 标记 [[KB:MISS]]）"
+)
 
 # 第 7 周 RabbitMQ 消费者使用（本周只落地模板）
 WEEKLY_PLAN_SYSTEM_PROMPT = """你是一位负责学员长期训练规划的资深教练。
@@ -1884,17 +1900,24 @@ def chat_with_rag(
 ) -> ChatResponse:
     """健身知识库 RAG 问答（规范 7.4）。
 
-    **三层降级**，任何一层可用都不会让调用方拿到 500：
+    **四层降级**，任何一层可用都不会让调用方拿到 500：
 
     1. **完整 RAG**：Embedding → Milvus Top-5 检索 → DeepSeek 基于 Context 生成
-    2. **检索结果 + 本地拼装**（Milvus 可用但无 LLM Key 或 MOCK_MODE=true）：
+    2. **通用知识回答**（知识库没覆盖这个问题时）：检索命中的资料相关度过低
+       （最高分低于 :data:`rag.RAG_CONTEXT_FLOOR`）或大模型判定资料与问题无关时，
+       丢弃资料、改用大模型通用健身知识回答
+    3. **检索结果 + 本地拼装**（Milvus 可用但无 LLM Key 或 MOCK_MODE=true）：
        保留真实检索来源，只是回答未经大模型润色
-    3. **内置知识库**（检索也不可用）：用项目内置 18 条知识做词法检索
+    4. **内置知识库**（检索也不可用）：用项目内置 18 条知识做词法检索
 
-    ⚠️ 走第 3 层时**必须**让调用方看出来：该层的 ``sources[].score`` 是启发式合成值
-    （不是余弦相似度），来源也不是 200 条真实知识库。因此返回值里带上
-    ``data_source`` / ``degraded`` / ``degradation_reason`` / ``sources[].score_type``
-    四个标记 —— 少了它们，调用方会把兜底结果当成真实 RAG 结果展示。
+    **每一层的标记都必须让调用方看出来**（``data_source`` / ``degraded`` /
+    ``degradation_reason`` / ``sources[].score_type``）：
+
+    - ``milvus``：回答确实基于 200 条真实知识库（``score_type=cosine``）
+    - ``llm_only``：检索到了资料但**回答没用**（未覆盖该问题）—— ``sources`` 为空，
+      且正文带"未经知识库佐证"提示
+    - ``none``：压根没检索到来源（检索失败/无命中）
+    - ``builtin``：内置 18 条兜底（``score_type=heuristic``，不是余弦相似度）
 
     :raises AgentInputError: 问题为空（HTTP 400）
     """
@@ -1935,7 +1958,14 @@ def _chat_with_real_rag(
     检索失败但 LLM 可用时，按规范降级为「纯 LLM 回答」并标注知识库不可用。
     """
     from .llm import LLMError, get_llm
-    from .rag import DEGRADED_NOTICE, get_rag_engine
+    from .rag import (
+        DEGRADED_NOTICE,
+        KB_MISS_MARKER,
+        KB_USED_MARKER,
+        LOW_RELEVANCE_NOTICE,
+        RAG_CONTEXT_FLOOR,
+        get_rag_engine,
+    )
 
     llm = get_llm()
     engine = get_rag_engine()
@@ -1954,12 +1984,26 @@ def _chat_with_real_rag(
         logger.info("知识库检索无命中，降级为纯 LLM 回答: question=%s", question[:30])
         degraded = True
 
+    # ---- 相关性闸门（地板分）----
+    # 低于地板分的资料**不交给大模型**：实测证明「没被覆盖的问题」也能拿到 0.82 的余弦分，
+    # 但低于 0.55 的基本都是彻底无关的（如"帮我写一首健身的诗" 0.5507），留着只会污染回答。
+    best_score = max((float(hit.score) for hit in hits), default=0.0)
+    context_passed = bool(hits) and best_score >= RAG_CONTEXT_FLOOR
+    if hits and not context_passed:
+        logger.info(
+            "检索命中的资料相关度过低（最高 %.4f < 地板 %.2f），不注入大模型: question=%s",
+            best_score, RAG_CONTEXT_FLOOR, question[:30],
+        )
+        degraded = True
+
     if not llm.configured or settings.mock_mode:
         # 没有 LLM Key（或 MOCK_MODE=true）时**不要**退回内置的 18 条 Mock 知识 ——
         # 那等于白白浪费已经检索到的 200 条真实知识。
         # 改为：用真实检索结果 + 本地拼装回答，并明确告知用户这份回答未经大模型润色。
-        if not hits:
-            raise LLMError("未配置 DEEPSEEK_API_KEY（或 MOCK_MODE=true），且知识库无命中，无法生成回答")
+        if not context_passed:
+            raise LLMError(
+                "未配置 DEEPSEEK_API_KEY（或 MOCK_MODE=true），且知识库没有可用命中的资料，无法生成回答"
+            )
 
         reason = "MOCK_MODE=true" if settings.mock_mode else "未配置 DEEPSEEK_API_KEY"
         logger.info(
@@ -1997,51 +2041,111 @@ def _chat_with_real_rag(
         )
 
     # ---- 生成回答 ----
-    if degraded:
+    low_relevance = bool(hits) and best_score < _retrieval_threshold()
+    if not context_passed:
+        # 连地板分都没到（或压根没命中）：明确告诉模型"没有资料"，让它用通用知识回答
         system_prompt = (
             RAG_SYSTEM_PROMPT.replace("【参考资料】\n{context}", "【参考资料】\n（无）")
             + f"\n\n{DEGRADED_NOTICE}"
         )
     else:
-        system_prompt = RAG_SYSTEM_PROMPT.format(context=context)
+        context_block = (
+            f"{LOW_RELEVANCE_CONTEXT_WARNING}\n{context}" if low_relevance else context
+        )
+        system_prompt = RAG_SYSTEM_PROMPT.format(context=context_block)
 
-    answer = llm.chat_with_system(
+    raw_answer = llm.chat_with_system(
         system_prompt,
         RAG_USER_PROMPT.format(question=question),
         temperature=0.3,   # 知识问答要稳，降低发散
         max_tokens=1200,
     )
 
-    sources = [
-        ChatSource(
-            category=hit.category,
-            title=hit.title,
-            content=hit.content,
-            score=round(float(hit.score), 4),
-            score_type="cosine",
+    # ---- 由大模型的自我判定决定「这一轮到底有没有用上知识库」----
+    marker, answer = _split_kb_marker(raw_answer)
+    used_kb = (
+        marker == KB_USED_MARKER
+        and context_passed          # 没给资料却自称用了资料 = 不可能，按没用处理
+    )
+
+    if used_kb:
+        sources = [
+            ChatSource(
+                category=hit.category,
+                title=hit.title,
+                content=hit.content,
+                score=round(float(hit.score), 4),
+                score_type="cosine",
+            )
+            for hit in hits
+        ]
+        logger.info(
+            "知识库问答完成(真实RAG): 来源=%d 条 最高分=%.4f 降级=%s llm=%s",
+            len(sources), best_score, degraded, llm.model,
         )
-        for hit in hits
-    ]
+        return ChatResponse(
+            question=question,
+            answer=answer,
+            sources=sources,
+            generated_at=now_local(),
+            data_source="milvus",
+            degraded=degraded,
+            degradation_reason=None,
+        )
+
+    # ---- 知识库没有覆盖这个问题：通用知识回答 + 如实标注 ----
+    if marker is None:
+        judge = "大模型未返回知识库使用标记（按保守口径判为未使用）"
+    elif not context_passed:
+        judge = "检索命中的资料相关度过低，未交给大模型"
+    else:
+        judge = "大模型判定给定资料与问题无关"
+
+    if not hits:
+        data_source = "none"           # 压根没有来源，而不是"有来源但没用"
+    else:
+        data_source = "llm_only"       # 有来源，但回答没采用
+    reason = f"知识库中未检索到与该问题相关的资料（{judge}，最高相似度 {best_score:.4f}）"
 
     logger.info(
-        "知识库问答完成(真实RAG): 来源=%d 条 降级=%s llm=%s",
-        len(sources), degraded, llm.model,
+        "知识库问答完成(通用知识兜底): data_source=%s 命中=%d 条 最高分=%.4f 原因=%s",
+        data_source, len(hits), best_score, judge,
     )
     return ChatResponse(
         question=question,
-        answer=answer,
-        sources=sources,
+        # 无条件加提示：这一层的回答没有知识库背书，必须让用户一眼看出来
+        answer=f"> {LOW_RELEVANCE_NOTICE}\n\n{answer}" if hits else f"> {DEGRADED_NOTICE}\n\n{answer}",
+        sources=[],
         generated_at=now_local(),
-        # 检索失败/无命中时 hits 为空 → 来源实为「无」，如实标注成 none，
-        # 避免前端把「没有来源」与「来源是知识库」混为一谈
-        data_source="milvus" if sources else "none",
-        degraded=degraded,
-        degradation_reason=(
-            "知识库检索失败或无命中，已退化为纯大模型回答（本条回答未使用知识库）"
-            if degraded
-            else None
-        ),
+        data_source=data_source,
+        degraded=True,
+        degradation_reason=reason,
     )
+
+
+def _split_kb_marker(raw_answer: str) -> Tuple[Optional[str], str]:
+    """从大模型回答里剥出「知识库使用标记」，返回 ``(标记, 干净正文)``。
+
+    <h3>为什么要有这个函数</h3>
+    回答里那行标记是给程序看的，不能出现在用户看到的正文里；同时它又是判断
+    "这轮到底有没有用上知识库"的唯一可信信号（见 :data:`rag.RAG_CONTEXT_FLOOR` 的说明）。
+
+    <h3>容错</h3>
+    - 标记前后可能有空行/空格，或模型多写了几句解释 —— 只扫前几行，找到即认；
+    - 大小写不敏感（模型偶尔会写成 ``[[kb:used]]``）；
+    - 找不到返回 ``(None, 原文)``：调用方按**保守口径**处理（判为未使用知识库）。
+    """
+    from .rag import KB_MISS_MARKER, KB_USED_MARKER
+
+    text = str(raw_answer or "").lstrip()
+    upper = text.upper()
+    for marker in (KB_USED_MARKER, KB_MISS_MARKER):
+        index = upper.find(marker)
+        # 只在开头 200 字符内认标记：避免正文里恰好提到这个词被误判
+        if 0 <= index <= 200:
+            clean = (text[:index] + text[index + len(marker):]).strip()
+            return marker, clean
+    return None, text.strip()
 
 
 def _chat_with_mock_knowledge(

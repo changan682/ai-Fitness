@@ -118,10 +118,18 @@ class ChatResponse(BaseModel):
     answer: str  # Markdown
     sources: List[ChatSource]
     generated_at: datetime
-    #: 来源库。``milvus``=200 条真实知识库检索；``builtin``=内置 18 条兜底；
-    #: ``none``=没检索到任何来源（纯大模型回答）
+    #: 来源库与「这轮回答到底有没有用知识库」：
+    #: - ``milvus``：回答确实基于 200 条真实知识库检索结果
+    #: - ``llm_only``：检索到了资料，但大模型判定它与问题无关 → 回答改用通用知识，
+    #:   ``sources`` 为空（**这一层是"知识库没覆盖该问题"的诚实表达**）
+    #: - ``none``：压根没检索到任何来源（检索失败/无命中），回答同样来自通用知识
+    #: - ``builtin``：内置 18 条兜底（``sources[].score_type=heuristic``）
+    #:
+    #: 判定「用没用知识库」的依据是大模型自己返回的标记
+    #: （``rag.KB_USED_MARKER`` / ``rag.KB_MISS_MARKER``），而不是余弦阈值 ——
+    #: 实测证明同领域无关问题也能拿到 0.82 的余弦分，阈值判不出来。
     data_source: str = "milvus"
-    #: 是否走了降级路径（检索失败/无命中、无 LLM Key 本地拼装、内置兜底）
+    #: 是否走了降级路径（知识库没覆盖、检索失败/无命中、无 LLM Key 本地拼装、内置兜底）
     degraded: bool = False
     #: 降级原因（给人看的中文说明），未降级时为 None
     degradation_reason: Optional[str] = None

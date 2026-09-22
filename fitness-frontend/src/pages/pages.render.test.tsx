@@ -423,4 +423,34 @@ describe('AI 标记的界面可见性', () => {
     // 余弦分数保留 4 位小数（与真实接口一致的展示口径）
     expect(screen.getByText('0.7502')).toBeInTheDocument()
   })
+
+  it('知识库没覆盖该问题时：显示「通用知识回答（未使用知识库）」且不展示来源', async () => {
+    // 这是用户实际反馈的体验问题：问到知识库没覆盖的话题（例如碳水循环）时，
+    // 旧实现会把无关资料塞给大模型并要求"基于资料回答"，界面上却看不出任何异常，
+    // 来源列表还挂着几条低分条目 —— 等于让用户以为回答有知识库依据。
+    const aiApi = (await import('@/api/aiApi')).default
+    vi.mocked(aiApi.chat).mockResolvedValue({
+      question: '训练后肌肉酸痛怎么办？',
+      answer: '## 结论\n\n知识库中没有相关资料，以下基于通用健身知识。',
+      sources: [],
+      dataSource: 'llm_only',
+      degraded: true,
+      degradationReason:
+        '知识库中未检索到与该问题相关的资料（大模型判定给定资料与问题无关，最高相似度 0.8206）',
+      generatedAt: '2026-09-21 12:00:00',
+    })
+
+    const user = userEvent.setup()
+    renderWithProviders(<AIAssistantPage />)
+
+    await user.click(await screen.findByRole('tab', { name: '💬 健身问答' }))
+    await user.click(await screen.findByRole('button', { name: '训练后肌肉酸痛怎么办？' }))
+
+    // 1) 必须明确告知「没用知识库」
+    expect(await screen.findByText('通用知识回答（未使用知识库）')).toBeInTheDocument()
+    expect(screen.getByText(/最高相似度 0.8206/)).toBeInTheDocument()
+
+    // 2) 不能展示任何来源（否则用户会以为回答有依据）
+    expect(screen.queryByText(/参考来源/)).not.toBeInTheDocument()
+  })
 })

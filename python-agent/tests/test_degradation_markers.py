@@ -1,7 +1,7 @@
 """降级/模拟标记的行为回归测试。
 
 <h3>为什么需要这个文件</h3>
-接入真实模型之前，项目有两处「输出看起来真实、实则是编造或降级结果」的路径：
+接入真实模型之前，项目有三处「输出看起来真实、实则是编造或降级结果」的路径：
 
 1. ``MOCK_MODE=true`` 时姿态评估返回由图片哈希派生的 45-95 分与预置问题/建议，
    而 ``PoseEvaluateResponse`` 与真实多模态推理**结构完全一致**；
@@ -9,9 +9,12 @@
    ``0.62 + 0.08*命中数 + 0.15*重合度`` 的**启发式合成值**，却与真实余弦相似度同形；
    更糟的是 ``_build_rag_answer`` 只在 ``best_score < 阈值`` 时才加降级提示，
    于是「命中的好」的问题会拿回一份**完全看不出降级**的回答。
+3. **知识库没覆盖这个问题时**（实测：无关问题也能拿到 0.82 的余弦分），旧实现照样把
+   无关资料塞给大模型并要求"基于资料回答"，``degraded=False``、来源里挂着低分条目 ——
+   用户拿到一份自称有依据、实则拼凑的回答。
 
-本文件锁住这两处的可见性：不管走到哪一层，调用方都必须能从响应里看出
-「这个分数是模型给的还是算出来的」「这次回答用的是知识库还是内置条目」。
+本文件锁住这三处的可见性：不管走到哪一层，调用方都必须能从响应里看出
+「这个分数是模型给的还是算出来的」「这次回答用的是知识库、通用知识还是内置条目」。
 
 只在字段层面加断言是不够的（字段存在但填错值一样没用），因此这里断言的是
 **每个分支实际填入的值**。
@@ -127,17 +130,34 @@ class _StubEngine:
 
 
 class _StubLLM:
+    """打桩大模型：默认「用上了知识库」。
+
+    ⚠️ 必须返回 ``[[KB:USED]]`` 标记 —— 判定「这轮有没有用知识库」的依据是模型自报的
+    标记，不是余弦阈值（实测证明同领域无关问题也能拿到 0.82，阈值判不出来）。
+    """
+
     model = "deepseek-stub"
     configured = True
 
+    answer = "[[KB:USED]]\n## 可以\n\n膝盖适度超过脚尖是正常的。\n\n> 📚 参考：《运动解剖学》"
+
     def chat_with_system(self, system_prompt, user_prompt, **kwargs):  # noqa: ARG002
-        return "## 可以\n\n膝盖适度超过脚尖是正常的。\n\n> 📚 参考：《运动解剖学》"
+        return self.answer
+
+
+class _StubLLMMiss(_StubLLM):
+    """打桩大模型：自报「资料与问题无关」，改用通用知识。"""
+
+    answer = (
+        "[[KB:MISS]]\n## 结论\n\n知识库中没有相关资料，以下基于通用健身知识：\n\n"
+        "建议循序渐进，注意恢复。"
+    )
 
 
 class TestChatDataSource:
     def test_real_rag_is_not_marked_degraded(self, monkeypatch):
-        """完整 RAG（检索命中 + LLM 可用）不应带任何降级标记。"""
-        hits = [_Hit(0.7321, "深蹲膝内扣的纠正")]
+        """完整 RAG（检索命中 + 模型自报用上了知识库）不应带任何降级标记。"""
+        hits = [_Hit(0.8123, "深蹲膝内扣的纠正")]
         monkeypatch.setattr(llm_module, "get_llm", lambda settings=None: _StubLLM())
         monkeypatch.setattr(rag_module, "get_rag_engine", lambda settings=None: _StubEngine(hits))
 
@@ -147,7 +167,79 @@ class TestChatDataSource:
         assert resp.degraded is False
         assert resp.degradation_reason is None
         assert [s.score_type for s in resp.sources] == ["cosine"]
-        assert resp.sources[0].score == 0.7321
+        assert resp.sources[0].score == 0.8123
+        assert "[[KB:" not in resp.answer, "标记是给程序看的，必须从正文里剥掉"
+
+    def test_model_says_irrelevant_falls_back_to_general_knowledge(self, monkeypatch):
+        """**本批次的核心回归测试**：检索有命中、但模型判定资料与问题无关。
+
+        这就是用户反馈的「知识库没有的时候只会背知识库」：旧实现无论资料多不相干，
+        都会把资料塞给大模型并要求"基于资料回答"，且 ``degraded=False``、
+        来源里挂着 5 条低分条目 —— 用户拿到一份自称有依据、实则拼凑的回答。
+
+        新实现必须：丢掉来源 + 标记 llm_only + 正文带「未经知识库佐证」提示。
+        """
+        # 0.8206 是实测里「碳水循环怎么安排」的真实分数：知识库没覆盖，却比
+        # 两条正经问题的分数（0.7327 / 0.7511）还高 —— 阈值永远判不出这一例。
+        hits = [_Hit(0.8206, "训练计划的中周期安排")]
+        monkeypatch.setattr(llm_module, "get_llm", lambda settings=None: _StubLLMMiss())
+        monkeypatch.setattr(rag_module, "get_rag_engine", lambda settings=None: _StubEngine(hits))
+
+        resp = agent.chat_with_rag("碳水循环具体怎么安排？")
+
+        assert resp.data_source == "llm_only"
+        assert resp.degraded is True
+        assert resp.sources == [], "判定没用知识库时不能把无关来源展示给用户"
+        assert "未经知识库佐证" in resp.answer
+        assert "知识库" in (resp.degradation_reason or "")
+        assert "0.8206" in (resp.degradation_reason or ""), "原因里要带上最高相似度，便于排查"
+
+    def test_below_floor_never_reaches_the_model(self, monkeypatch):
+        """低于地板分的资料**不能**进入 Prompt —— 那是最典型的上下文污染。"""
+        seen = {}
+
+        class _SpyLLM(_StubLLMMiss):
+            def chat_with_system(self, system_prompt, user_prompt, **kwargs):  # noqa: ARG002
+                seen["system"] = system_prompt
+                return self.answer
+
+        hits = [_Hit(0.4200, "完全无关的条目")]
+        monkeypatch.setattr(llm_module, "get_llm", lambda settings=None: _SpyLLM())
+        monkeypatch.setattr(rag_module, "get_rag_engine", lambda settings=None: _StubEngine(hits))
+
+        resp = agent.chat_with_rag("帮我写一首关于健身的诗")
+
+        assert "【参考资料】\n（无）" in seen["system"], "低于地板分的资料不该被注入"
+        assert resp.data_source == "llm_only"
+        assert resp.sources == []
+        assert "未交给大模型" in (resp.degradation_reason or "")
+
+    def test_missing_marker_is_treated_conservatively(self, monkeypatch):
+        """模型没给标记时按「没用知识库」处理：宁可标过头，也不能假装有依据。"""
+
+        class _NoMarkerLLM(_StubLLM):
+            answer = "## 可以\n\n膝盖适度超过脚尖是正常的。"
+
+        hits = [_Hit(0.7900, "深蹲膝内扣的纠正")]
+        monkeypatch.setattr(llm_module, "get_llm", lambda settings=None: _NoMarkerLLM())
+        monkeypatch.setattr(rag_module, "get_rag_engine", lambda settings=None: _StubEngine(hits))
+
+        resp = agent.chat_with_rag("深蹲膝盖内扣怎么办")
+
+        assert resp.data_source == "llm_only"
+        assert resp.sources == []
+        assert "未返回知识库使用标记" in (resp.degradation_reason or "")
+
+    def test_marker_alone_is_not_enough_without_context(self, monkeypatch):
+        """模型自称用了知识库、但实际没给资料时，不能采信（防"自称有依据"）。"""
+        monkeypatch.setattr(llm_module, "get_llm", lambda settings=None: _StubLLM())
+        monkeypatch.setattr(rag_module, "get_rag_engine", lambda settings=None: _StubEngine([]))
+
+        resp = agent.chat_with_rag("随便问问")
+
+        assert resp.data_source == "none", "没有来源就是没有来源，不能因为模型自称就标成 milvus"
+        assert resp.sources == []
+        assert resp.degraded is True
 
     def test_builtin_fallback_is_fully_marked(self, monkeypatch):
         """第 3 层兜底：来源库、降级原因、分数口径三项都必须如实标注。"""
@@ -218,18 +310,6 @@ class TestChatDataSource:
         assert resp.degraded is True
         assert "未经" in (resp.degradation_reason or "")
 
-    def test_no_hits_with_llm_is_marked_source_none(self, monkeypatch):
-        """检索失败但 LLM 可用（纯大模型回答）：来源应为 none，而不是假装有来源。"""
-        monkeypatch.setattr(llm_module, "get_llm", lambda settings=None: _StubLLM())
-        monkeypatch.setattr(rag_module, "get_rag_engine", lambda settings=None: _StubEngine([]))
-
-        resp = agent.chat_with_rag("随便问问")
-
-        assert resp.sources == []
-        assert resp.data_source == "none"
-        assert resp.degraded is True
-        assert resp.degradation_reason
-
 
 # ============================================================
 # 3. 契约：这些标记必须真的出现在 HTTP 响应里
@@ -258,6 +338,19 @@ class TestMarkersReachTheHttpEnvelope:
         assert payload["degraded"] is True
         assert payload["degradation_reason"]
         assert all(s["score_type"] == "heuristic" for s in payload["sources"])
+
+    def test_llm_only_reaches_the_http_envelope(self, monkeypatch):
+        """``llm_only`` 也必须真的出现在给 Java 的 JSON 里（新标记的契约锁）。"""
+        hits = [_Hit(0.8206, "训练计划的中周期安排")]
+        monkeypatch.setattr(llm_module, "get_llm", lambda settings=None: _StubLLMMiss())
+        monkeypatch.setattr(rag_module, "get_rag_engine", lambda settings=None: _StubEngine(hits))
+
+        payload = agent.chat_with_rag("碳水循环具体怎么安排？").model_dump(mode="json")
+
+        assert payload["data_source"] == "llm_only"
+        assert payload["degraded"] is True
+        assert payload["sources"] == []
+        assert "未经知识库佐证" in payload["answer"]
 
 
 if __name__ == "__main__":  # pragma: no cover

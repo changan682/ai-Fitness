@@ -128,14 +128,16 @@ export interface ChatResponse {
   answer: string
   sources: ChatSource[]
   /**
-   * 来源库
+   * 来源库与「这轮回答到底有没有用知识库」
    * <p>
-   * - `milvus`：200 条真实知识库检索结果
+   * - `milvus`：回答确实基于 200 条真实知识库检索结果
+   * - `llm_only`：检索到了资料，但判定它与问题无关 → 回答改用大模型通用知识，
+   *   `sources` 为空。**这是「知识库没覆盖该问题」的诚实表达**，界面必须提示
+   * - `none`：压根没检索到来源（检索失败/无命中），回答同样来自通用知识
    * - `builtin`：内置 18 条兜底（此时 `sources[].scoreType` 必为 `heuristic`）
-   * - `none`：没检索到来源（纯大模型回答）
    */
-  dataSource: 'milvus' | 'builtin' | 'none' | string
-  /** 是否走了降级路径（检索失败/无命中、无 LLM Key 本地拼装、内置兜底） */
+  dataSource: 'milvus' | 'llm_only' | 'none' | 'builtin' | string
+  /** 是否走了降级路径（知识库没覆盖、检索失败/无命中、无 LLM Key 本地拼装、内置兜底） */
   degraded: boolean
   /** 降级原因（中文说明），未降级时为 null */
   degradationReason: string | null
@@ -155,7 +157,7 @@ export interface ChatMessage {
   pending?: boolean
   /** 出错时的提示文案（显示错误卡片） */
   errorText?: string
-  /** 来源库（milvus/builtin/none）—— 用于标注「内置条目」 */
+  /** 来源库（milvus/llm_only/none/builtin）—— 用于标注「通用知识回答」与「内置条目」 */
   dataSource?: string
   /** 是否为降级回答 */
   degraded?: boolean

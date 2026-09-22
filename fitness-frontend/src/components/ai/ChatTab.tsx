@@ -173,7 +173,8 @@ export default function ChatTab() {
                 <div>
                   {/*
                     降级标注：后端会在这些情况下打标记 ——
-                    检索失败/无命中（纯大模型回答）、无 LLM Key 本地拼装、内置 18 条兜底。
+                    ① 知识库没覆盖该问题（llm_only：检索到了资料但回答没用，sources 为空）
+                    ② 检索失败/无命中（none）、无 LLM Key 本地拼装、内置 18 条兜底（builtin）。
                     不显示的话，「兜底回答」与真实 RAG 回答在界面上完全一样，
                     而兜底来源的相关度其实是启发式合成分数，不是余弦相似度。
                   */}
@@ -182,7 +183,13 @@ export default function ChatTab() {
                       type={m.dataSource === 'builtin' ? 'warning' : 'info'}
                       showIcon
                       className="mb-2"
-                      message={m.dataSource === 'builtin' ? '降级回答（内置知识条目）' : '降级回答'}
+                      message={
+                        m.dataSource === 'builtin'
+                          ? '降级回答（内置知识条目）'
+                          : m.dataSource === 'llm_only'
+                            ? '通用知识回答（未使用知识库）'
+                            : '降级回答'
+                      }
                       description={m.degradationReason ?? undefined}
                     />
                   )}
