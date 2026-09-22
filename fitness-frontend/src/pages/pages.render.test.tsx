@@ -160,6 +160,9 @@ vi.mock('@/api/aiApi', () => ({
     chat: vi.fn(),
     newChatSession: vi.fn(),
     knowledgeHealth: vi.fn(),
+    // 批次 D：身体状态主动问询。新增的 api 方法必须登记在这里，
+    // 否则调用处拿到的是 undefined，报错会落在被测代码上而不是测试上
+    bodyConsult: vi.fn(),
   },
 }))
 
@@ -620,5 +623,164 @@ describe('对话记忆（sessionId）', () => {
     // 气泡被清空：回到快捷提问的初始态
     expect(await screen.findByText('试试问我这些问题')).toBeInTheDocument()
     expect(window.sessionStorage.getItem('fitness-ai-chat-session')).toBeNull()
+  })
+})
+
+// ==================== 身体状态主动问询（批次 D） ====================
+
+describe('AI 身体状态问询（批次 D）', () => {
+  // 模块级 mock 的实现与调用记录会跨用例累积，这里清掉调用次数，
+  // 否则「点击前不应该调用」这类断言会被上一个用例的调用记录污染
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  /** 正常（真实大模型）返回：用来和 rule_based 对比「不该出现标记」 */
+  const llmResponse = {
+    assessment: '整体判断：近 30 天体重与围度基本稳定，训练频率正常。',
+    trendSummary: '近 7 天体重从 71.2 kg 降至 70.4 kg（-0.8 kg），腰围减少 1.0 cm。',
+    questions: [
+      { id: 'q-1', text: '最近一周的饮食有变化吗？', why: '体重变化速度与热量摄入直接相关。' },
+    ],
+    suggestions: [{ title: '保持蛋白质摄入', detail: '每天按 1.6-2.0 g/kg 体重摄入。' }],
+    riskFlags: [],
+    dataSource: 'llm',
+    degraded: false,
+    degradationReason: null,
+    generatedAt: '2026-09-23 09:00:00',
+    cached: false,
+  }
+
+  it('点击「让 AI 看看我的变化」才调用接口（不是自动 fetch），并渲染整体判断', async () => {
+    // 这条用例守的是「省 token、不打扰」这个产品决定：
+    // 若哪天有人把 bodyConsult 挂到 useQuery 上自动跑，一进档案页就会烧一次大模型调用，
+    // 界面看起来完全正常 —— 只有这里能拦住
+    const aiApi = (await import('@/api/aiApi')).default
+    vi.mocked(aiApi.bodyConsult).mockResolvedValue(llmResponse)
+
+    const user = userEvent.setup()
+    renderWithProviders(<ProfilePage />)
+    await screen.findByText('测试用户')
+
+    expect(screen.getByText('🤖 AI 主动追问')).toBeInTheDocument()
+    expect(aiApi.bodyConsult).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole('button', { name: '让 AI 看看我的变化' }))
+
+    await waitFor(() => expect(aiApi.bodyConsult).toHaveBeenCalledTimes(1))
+    expect(await screen.findByText(/整体判断：近 30 天体重与围度基本稳定/)).toBeInTheDocument()
+    expect(screen.getByText(/近 7 天体重从 71.2 kg 降至 70.4 kg/)).toBeInTheDocument()
+    // 追问与理由、建议也都要真的渲染出来
+    expect(screen.getByText('最近一周的饮食有变化吗？')).toBeInTheDocument()
+    expect(screen.getByText('体重变化速度与热量摄入直接相关。')).toBeInTheDocument()
+    expect(screen.getByText('保持蛋白质摄入')).toBeInTheDocument()
+  })
+
+  it('dataSource 为 rule_based 时，卡片顶部标注「规则生成（未使用大模型）」并给出原因', async () => {
+    // 硬规矩：规则兜底的结果必须在界面上看得见。
+    // 否则用户会把后端模板拼出来的句子当成 AI 的分析结论 —— 这正是「编造数据」的另一种形式
+    const aiApi = (await import('@/api/aiApi')).default
+    vi.mocked(aiApi.bodyConsult).mockResolvedValue({
+      ...llmResponse,
+      dataSource: 'rule_based',
+      degraded: true,
+      degradationReason: '身体数据不足 7 天，未调用大模型，已改用规则模板生成',
+    })
+
+    const user = userEvent.setup()
+    renderWithProviders(<ProfilePage />)
+    await screen.findByText('测试用户')
+
+    await user.click(screen.getByRole('button', { name: '让 AI 看看我的变化' }))
+
+    expect(await screen.findByText('规则生成（未使用大模型）')).toBeInTheDocument()
+    expect(screen.getByText(/未调用大模型，已改用规则模板生成/)).toBeInTheDocument()
+  })
+
+  it('riskFlags 里的 high 级别风险文本可见（不能被吞掉）', async () => {
+    const aiApi = (await import('@/api/aiApi')).default
+    vi.mocked(aiApi.bodyConsult).mockResolvedValue({
+      ...llmResponse,
+      riskFlags: [
+        { level: 'info', text: '体脂率 18.5%，处于健康区间。' },
+        {
+          level: 'high',
+          text: '近 7 天体重下降 3.2 kg，超出安全区间，建议尽快评估饮食与训练量。',
+        },
+      ],
+    })
+
+    const user = userEvent.setup()
+    renderWithProviders(<ProfilePage />)
+    await screen.findByText('测试用户')
+
+    await user.click(screen.getByRole('button', { name: '让 AI 看看我的变化' }))
+
+    expect(await screen.findByText(/超出安全区间，建议尽快评估饮食与训练量/)).toBeInTheDocument()
+    expect(screen.getByText(/体脂率 18.5%，处于健康区间/)).toBeInTheDocument()
+  })
+
+  it('真实大模型且未降级：不出现任何降级/兜底提示', async () => {
+    const aiApi = (await import('@/api/aiApi')).default
+    vi.mocked(aiApi.bodyConsult).mockResolvedValue(llmResponse)
+
+    const user = userEvent.setup()
+    renderWithProviders(<ProfilePage />)
+    await screen.findByText('测试用户')
+
+    await user.click(screen.getByRole('button', { name: '让 AI 看看我的变化' }))
+    await screen.findByText(/整体判断：近 30 天体重与围度基本稳定/)
+
+    // 反向断言同样重要：若标记逻辑写成「无条件显示」，这条用例是唯一会红的
+    expect(screen.queryByText(/降级回答/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/规则生成/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/结果来源：/)).not.toBeInTheDocument()
+  })
+
+  it('问答页：点「让 AI 根据我的身体状态提问」会把第一条追问直接发出去（复用会话记忆）', async () => {
+    const aiApi = (await import('@/api/aiApi')).default
+    vi.mocked(aiApi.bodyConsult).mockResolvedValue(llmResponse)
+    vi.mocked(aiApi.chat).mockResolvedValue({
+      question: '最近一周的饮食有变化吗？',
+      answer: '## 结论\n先从总热量看起。',
+      sources: [],
+      dataSource: 'milvus',
+      degraded: false,
+      degradationReason: null,
+      sessionId: '3f1c8b9e-6a2d-4f5b-9c7e-1d2a3b4c5d6e',
+      generatedAt: '2026-09-23 09:05:00',
+    })
+
+    const user = userEvent.setup()
+    renderWithProviders(<AIAssistantPage />)
+
+    await user.click(await screen.findByRole('tab', { name: '💬 健身问答' }))
+    await user.click(
+      await screen.findByRole('button', { name: '让 AI 根据我的身体状态提问' }),
+    )
+
+    await waitFor(() => expect(aiApi.bodyConsult).toHaveBeenCalledTimes(1))
+    // 追问不是自己发请求，而是走已有的 send()：这条用例就是「真的接了会话记忆」的证据
+    await waitFor(() => expect(aiApi.chat).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(aiApi.chat).mock.calls[0][0].question).toBe('最近一周的饮食有变化吗？')
+  })
+
+  it('问答页：没有可追问的问题时不发送空问题，只给一句提示', async () => {
+    const aiApi = (await import('@/api/aiApi')).default
+    vi.mocked(aiApi.bodyConsult).mockResolvedValue({ ...llmResponse, questions: [] })
+
+    const user = userEvent.setup()
+    renderWithProviders(<AIAssistantPage />)
+
+    await user.click(await screen.findByRole('tab', { name: '💬 健身问答' }))
+    await user.click(
+      await screen.findByRole('button', { name: '让 AI 根据我的身体状态提问' }),
+    )
+
+    expect(
+      await screen.findByText('暂时没有可追问的问题，先记录几天身体数据吧'),
+    ).toBeInTheDocument()
+    // 关键：不能把空字符串当问题发出去 —— 那会白白烧一次问答的大模型调用
+    expect(aiApi.chat).not.toHaveBeenCalled()
   })
 })

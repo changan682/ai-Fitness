@@ -66,6 +66,11 @@ class WebConfigAuthWhitelistTest {
         assertFalse(isPublic("/api/v1/training/records"));
         assertFalse(isPublic("/api/ai/chat"));
         assertFalse(isPublic("/api/v1/body-metric/trend"));
+        // 批次 C / D 新增的两个接口都涉及用户私有数据，必须鉴权
+        assertFalse(isPublic("/api/ai/chat/new-session"),
+                "清会话只能清自己的，绝不能被免鉴权放行");
+        assertFalse(isPublic("/api/ai/body-consult"),
+                "身体状态问询读的是训练/体测/伤病，放行就等于任何人都能查别人的身体状况");
     }
 
     @Test

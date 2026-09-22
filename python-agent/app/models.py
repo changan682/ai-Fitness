@@ -19,7 +19,7 @@
 """
 
 from datetime import date, datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -151,6 +151,64 @@ class ChatResponse(BaseModel):
     degraded: bool = False
     #: 降级原因（给人看的中文说明），未降级时为 None
     degradation_reason: Optional[str] = None
+
+
+# --- 身体状态主动问询（体验优化批次 D） ---
+class BodyConsultRequest(BaseModel):
+    """Java 组装好的"身体状态快照"。
+
+    Python 侧刻意**不查数据库**：本项目里 Python 只做 AI 推理，
+    取数、口径、权限一律由 Java（BFF）负责 —— 否则同一份口径会在两种语言里各写一遍，
+    迟早对不上（"最新体重"到底取档案还是取体测，项目里已经踩过一次）。
+
+    所有字段都可空：新用户可能一次体测都没记过，此时不调大模型，直接用规则回复。
+    """
+    user_id: Optional[int] = None
+    profile: Optional[Dict[str, Any]] = None
+    #: 最新一条体测（t_body_metric）
+    latest_metric: Optional[Dict[str, Any]] = None
+    #: 上一条体测，用于算变化
+    prev_metric: Optional[Dict[str, Any]] = None
+    #: 近 7 天趋势（weight_delta / waist_delta / weight_avg7d / samples）
+    trend7d: Optional[Dict[str, Any]] = None
+    #: 近 7 天训练（sessions / total_volume / avg_rpe / muscles）
+    training7d: Optional[Dict[str, Any]] = None
+    #: 近 7 天有饮食记录的天数
+    diet_days_recorded: Optional[int] = None
+
+
+class BodyConsultQuestion(BaseModel):
+    """一条主动追问。``why`` 说明"为什么问这个"，让用户知道这不是随机提问。"""
+
+    id: str
+    text: str
+    why: str
+
+
+class BodyConsultSuggestion(BaseModel):
+    title: str
+    detail: str
+
+
+class BodyConsultRiskFlag(BaseModel):
+    """风险提示。``level``：info / warn / high（high 会强制附就医提醒）。"""
+
+    level: str = Field(..., pattern="^(info|warn|high)$")
+    text: str
+
+
+class BodyConsultResponse(BaseModel):
+    assessment: str
+    trend_summary: str
+    questions: List[BodyConsultQuestion]
+    suggestions: List[BodyConsultSuggestion]
+    risk_flags: List[BodyConsultRiskFlag]
+    #: ``llm`` = 大模型基于快照生成；``rule_based`` = 未用大模型的阈值规则兜底。
+    #: 前端必须按它标注「规则生成（未使用大模型）」—— 与本项目其它降级标记同一原则。
+    data_source: str = "llm"
+    degraded: bool = False
+    degradation_reason: Optional[str] = None
+    generated_at: datetime
 
 
 # --- Milvus 健康检查 ---

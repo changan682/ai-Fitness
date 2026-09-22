@@ -52,7 +52,7 @@ python-agent/
 │   ├── verify_summary_layers.py   # AI 总结双层缓存/同部位对比/变更失效（12 项）
 │   ├── verify_java_ai_endpoints.py# Java /api/ai/* 五接口端到端（27 项，含 multipart）
 │   └── _test_image.py             # 验收脚本共用的测试图片（宽高须 >10px，见模块注释）
-├── tests/                    # pytest（401 项）
+├── tests/                    # pytest（426 项）
 ├── Dockerfile                # 生产镜像（python:3.12-slim）
 ├── docker-entrypoint.sh      # 等 Milvus 就绪后再起 FastAPI
 ├── requirements.txt
@@ -248,7 +248,8 @@ WARNING 未配置真实 Embedding（当前 provider=hashing）：RAG 检索只�
 | POST | `/agent/v1/summary` | 训练智能总结 | `{user_id, date, records:[{action,sets,reps,weight,rpe}], comparison}` | `summary`（Markdown）、`generated_at` |
 | POST | `/agent/v1/recommend` | 动作智能推荐 | `{target_muscle, equipment:[...], count}` | `recommendations:[{action_name,target_muscle,focus_area,recommended_sets,recommended_reps,difficulty,notes,equipment}]`、`generated_at` |
 | POST | `/agent/v1/pose-evaluate` | 动作姿态评估 | `{image_base64, action_name}` | `score`、`score_level`、`issues`、`suggestions`、`good_points`、`evaluated_at`、**`data_source`** |
-| POST | `/agent/v1/chat` | 知识库 RAG 问答 | `{question, category, user_id}` | `question`、`answer`（Markdown）、`sources:[{category,title,content,score,`**`score_type`**`}]`、`generated_at`、**`data_source`**、**`degraded`**、**`degradation_reason`** |
+| POST | `/agent/v1/chat` | 知识库 RAG 问答 | `{question, category, user_id, history:[{role,content}]}` | `question`、`answer`（Markdown）、`sources:[{category,title,content,score,`**`score_type`**`}]`、`generated_at`、**`data_source`**、**`degraded`**、**`degradation_reason`** |
+| POST | `/agent/v1/body-consult` | 身体状态主动问询（批次 D） | Java 组装的快照：`{user_id, profile, latest_metric, prev_metric, trend7d, training7d, diet_days_recorded}` | `assessment`、`trend_summary`、`questions:[{id,text,why}]`、`suggestions:[{title,detail}]`、`risk_flags:[{level,text}]`、**`data_source`**（`llm` / `rule_based`）、**`degraded`**、**`degradation_reason`**、`generated_at` |
 | GET | `/agent/v1/knowledge/health` | Milvus 知识库健康 | — | `milvus_connected`、`collection_name`、`total_documents`、`last_updated`、`index_type`、`embedding_dim` |
 
 > 对外只暴露 Java 的 `/api/ai/*`；`/agent/v1/*` 是内网接口，仅 Java 调用（规范第十一章第 3 条）。
@@ -284,15 +285,22 @@ question → Embedding(768维) → Milvus search(Top-5, COSINE, nprobe=4)
 > ⚠️ **`scope` 必须原样告知大模型**。第 4 周曾把「同名动作口径」的百分比渲染成
 > 「同部位」，导致文字与数字对不上 —— 渲染文案必须跟着 `scope` 走。
 
-### 7.2 问答的三层降级（规范第 3547 行）
+### 7.2 问答的四层降级（规范第 3547 行 + 体验优化批次 A）
 
-| 层 | 条件 | 行为 |
-|---|---|---|
-| 1 | Milvus + LLM 都可用 | 完整 RAG：真实检索 + 大模型生成 |
-| 2 | Milvus 可用、无 LLM Key（或 `MOCK_MODE=true`） | **真实检索结果 + 本地拼装回答**，并标注「未经 AI 润色」 |
-| 3 | 检索也失败 | 用内置 18 条知识兜底，保证接口不 500 |
+| 层 | 条件 | 行为 | 标记 |
+|---|---|---|---|
+| 1 | 检索命中**且**大模型自报用上了资料 | 完整 RAG：真实检索 + 大模型生成 | `data_source=milvus`、`degraded=false` |
+| 2 | 检索有命中但**大模型判定资料与问题无关**（或命中分低于地板 0.55） | 丢弃资料，改用大模型通用健身知识回答 | `data_source=llm_only`、`degraded=true`、`sources=[]`，正文带「未经知识库佐证」 |
+| 3 | Milvus 可用、无 LLM Key（或 `MOCK_MODE=true`） | **真实检索结果 + 本地拼装回答**，并标注「未经 AI 润色」 | `data_source=milvus`、`degraded=true` |
+| 4 | 检索也失败 | 用内置 18 条知识兜底，保证接口不 500 | `data_source=builtin`、分数 `heuristic` |
 
-> 第 2 层是刻意设计：已经检索到 200 条真实知识时，**不该退回内置的 18 条** —— 那等于白丢检索结果。
+> 第 3 层是刻意设计：已经检索到 200 条真实知识时，**不该退回内置的 18 条** —— 那等于白丢检索结果。
+>
+> **第 2 层为什么用"大模型自报"而不是余弦阈值**：实测（真实 DashScope Embedding + 200 条知识库）
+> 发现同领域内的密向量分不开"相关/不相关" —— 「碳水循环怎么安排」这个**没被覆盖**的问题拿到
+> 0.8206 分，比「训练后肌肉酸痛还能练吗」这个**被覆盖**的问题（0.7327）还高。
+> 因此阈值只当地板（`rag.RAG_CONTEXT_FLOOR=0.55`，挡掉明显无关的），判决交给大模型自己
+> 输出的 `[[KB:USED]]` / `[[KB:MISS]]` 标记；模型没给标记时按**保守口径**判为"未使用知识库"。
 
 ### 7.3 训练总结的降级
 
@@ -313,6 +321,7 @@ question → Embedding(768维) → Milvus search(Top-5, COSINE, nprobe=4)
 | `summary` 的文案 | 配了 Key 后 ✅ DeepSeek 生成 | 无 Key 时为本地拼装 |
 | `recommend` | ✅ DeepSeek 生成 + **动作名白名单校验**（只允许动作库里的动作） | LLM 失败/越界时回退内置动作库规则引擎；`MOCK_MODE=true` 时只用规则引擎 |
 | `pose-evaluate` | ✅ **真实多模态推理**（qwen-vl-max 看图给分），`score_level` 由 `score` 严格派生 | `MOCK_MODE=true` 时才走本地模拟打分（由图片哈希派生），此时响应标 `data_source=mock_local` |
+| `body-consult`（批次 D） | ✅ 有 Key 时由 DeepSeek 基于 Java 组的快照生成追问/建议 | 无 Key / 无体测数据 / 返回不可解析时走**阈值规则引擎**，标 `data_source=rule_based`；规则只用快照里的真实数字判断 |
 
 ### 8.1 哪些结果是真、哪些打了折扣（第 8 周新增的标记）
 

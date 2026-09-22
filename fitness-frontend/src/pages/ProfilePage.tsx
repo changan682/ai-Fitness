@@ -1,5 +1,6 @@
 import { EditOutlined, LoadingOutlined, UserOutlined } from '@ant-design/icons'
 import {
+  Alert,
   App,
   Avatar,
   Button,
@@ -22,11 +23,17 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import dayjs, { type Dayjs } from 'dayjs'
 import { useEffect, useState } from 'react'
 import { ApiError } from '@/api/client'
+import aiApi from '@/api/aiApi'
 import bodyMetricApi from '@/api/bodyMetricApi'
 import userApi from '@/api/userApi'
 import { useUserStore } from '@/store'
 import { ErrorCode, Gender, toOptions, TrainingGoal, TrainingLevel } from '@/types'
-import type { BodyMetricRequest, UpdateProfileRequest, UserProfile } from '@/types'
+import type {
+  BodyConsultResponse,
+  BodyMetricRequest,
+  UpdateProfileRequest,
+  UserProfile,
+} from '@/types'
 
 const DATE_FMT = 'YYYY-MM-DD'
 const PROFILE_KEY = ['user', 'profile'] as const
@@ -91,6 +98,196 @@ function ProfileFormSkeleton() {
         </div>
       ))}
     </Space>
+  )
+}
+
+// ==================== AI 主动追问（批次 D） ====================
+
+/**
+ * 风险级别 → antd Alert 类型
+ * <p>
+ * 后端只给**语义级别**（info/warn/high），用哪个组件是前端的事。
+ * 映射错了后果很实际：把 `high` 画成蓝色 info，等于把「这周体重掉了 3kg」这种
+ * 需要用户重视的提示弱化成一句普通说明。
+ */
+const RISK_ALERT_TYPE: Record<string, 'info' | 'warning' | 'error'> = {
+  info: 'info',
+  warn: 'warning',
+  high: 'error',
+}
+
+/** 卡片顶部的「诚实标记」条目，结构与 antd Alert 对齐 */
+interface ConsultNotice {
+  type: 'info' | 'warning' | 'error'
+  message: string
+  description?: string
+}
+
+/**
+ * 把「这份结果打了什么折扣」翻译成界面上的标记
+ * <p>
+ * 项目的硬规矩是**降级/兜底结果必须在界面上看得见**，因此这里宁可多标也不漏标：
+ * - `rule_based`：压根没调用大模型，是后端规则模板拼出来的。不标就等于把模板包装成 AI 分析结论；
+ * - `degraded`：用了大模型但走了降级路径（数据太少、模型超时回落等），必须挂出原因；
+ * - 其它未知 `dataSource`：后端将来新增来源时也不会「静默通过」——
+ *   漏标比多标严重得多，未知来源先如实展示出来。
+ */
+function buildConsultNotices(data: BodyConsultResponse): ConsultNotice[] {
+  const notices: ConsultNotice[] = []
+  if (data.dataSource === 'rule_based') {
+    notices.push({
+      type: 'warning',
+      message: '规则生成（未使用大模型）',
+      description: data.degradationReason ?? undefined,
+    })
+  } else if (data.dataSource !== 'llm') {
+    notices.push({
+      type: 'warning',
+      message: `结果来源：${data.dataSource}`,
+      description: data.degradationReason ?? undefined,
+    })
+  }
+  if (data.degraded && data.dataSource === 'llm') {
+    notices.push({
+      type: 'warning',
+      message: '降级回答',
+      description: data.degradationReason ?? undefined,
+    })
+  }
+  return notices
+}
+
+/**
+ * 「🤖 AI 主动追问」卡片
+ * <p>
+ * <h3>为什么做成手动触发而不是自动拉取</h3>
+ * 后端 `/ai/body-consult` 会真的走一次大模型（每轮都要带身体数据进上下文）。
+ * 若把它挂在 `useQuery` 上自动 fetch，用户每次打开档案页、每次保存体测都会触发一次调用：
+ * 既烧 token，也会在用户只想「记个体重」时突然弹出一屏追问。
+ * 所以这里用 `useMutation` —— **只有点了按钮才会请求**。
+ */
+function BodyConsultCard() {
+  const consultMutation = useMutation({
+    mutationFn: () => aiApi.bodyConsult(),
+  })
+
+  const data = consultMutation.data
+  const notices = data ? buildConsultNotices(data) : []
+  const { error } = consultMutation
+
+  return (
+    <Card title="🤖 AI 主动追问" className="mt-4">
+      {consultMutation.isPending ? (
+        /* 请求中先出骨架：这个接口要等大模型，空白卡片会被当成「点了没反应」 */
+        <Skeleton active paragraph={{ rows: 4 }} title={false} />
+      ) : (
+        <>
+          {/* 诚实标记永远排在最前面：用户第一眼就该知道这份结论是怎么来的 */}
+          {notices.map((n) => (
+            <Alert
+              key={n.message}
+              type={n.type}
+              showIcon
+              className="mb-2"
+              message={n.message}
+              description={n.description}
+            />
+          ))}
+
+          {consultMutation.isError && (
+            <Alert
+              type="warning"
+              showIcon
+              className="mb-2"
+              message={
+                error instanceof ApiError && error.msg
+                  ? error.msg
+                  : 'AI 暂时不可用，请稍后再试'
+              }
+            />
+          )}
+
+          {data && (
+            <div className="space-y-3">
+              <div>
+                <div className="mb-1 text-xs text-gray-500">整体判断</div>
+                <div className="whitespace-pre-wrap text-sm">{data.assessment}</div>
+              </div>
+
+              <div>
+                <div className="mb-1 text-xs text-gray-500">趋势要点</div>
+                <div className="whitespace-pre-wrap text-sm">{data.trendSummary}</div>
+              </div>
+
+              {/* 风险提示逐条用 Alert：级别不同颜色不同，别合并成一段文字 */}
+              {data.riskFlags.length > 0 && (
+                <div className="space-y-2">
+                  {data.riskFlags.map((flag, index) => (
+                    <Alert
+                      key={`${flag.level}-${index}`}
+                      type={RISK_ALERT_TYPE[flag.level] ?? 'info'}
+                      showIcon
+                      message={flag.text}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {data.questions.length > 0 && (
+                <div>
+                  <div className="mb-1 text-xs text-gray-500">AI 想问你</div>
+                  <ol className="list-decimal pl-5 text-sm">
+                    {data.questions.map((q) => (
+                      <li key={q.id} className="mb-1">
+                        <div>{q.text}</div>
+                        {/* why 用灰色小字：解释「为什么问这个」，用户才知道值不值得回答 */}
+                        <div className="text-xs text-gray-400">{q.why}</div>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              )}
+
+              {data.suggestions.length > 0 && (
+                <div>
+                  <div className="mb-1 text-xs text-gray-500">建议</div>
+                  <ol className="list-decimal pl-5 text-sm">
+                    {data.suggestions.map((s) => (
+                      <li key={s.title} className="mb-1">
+                        <div className="font-medium">{s.title}</div>
+                        <div className="text-xs text-gray-500">{s.detail}</div>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              )}
+
+              <div className="text-xs text-gray-400">
+                生成于 {data.generatedAt}
+                {/* 命中缓存要说出来：否则用户会以为「这就是刚刚算出来的」 */}
+                {data.cached ? '（命中服务端缓存）' : ''}
+              </div>
+            </div>
+          )}
+
+          {!data && !consultMutation.isError && (
+            <p className="mb-3 text-xs text-gray-400">
+              AI 会结合你的体测数据与近期训练记录，主动问几个和你有关系的问题。
+            </p>
+          )}
+
+          <Button
+            type="primary"
+            block
+            className="mt-3"
+            loading={consultMutation.isPending}
+            onClick={() => consultMutation.mutate()}
+          >
+            {data ? '重新看看我的变化' : '让 AI 看看我的变化'}
+          </Button>
+        </>
+      )}
+    </Card>
   )
 }
 
@@ -403,6 +600,9 @@ export default function ProfilePage() {
             </Form.Item>
           </Form>
         </Card>
+
+        {/* 主动问询放在体测卡片下方：用户刚看完自己的体重/围度，提问的动机最强 */}
+        <BodyConsultCard />
       </Col>
 
       {/* 右栏：档案表单（未进入编辑模式时整体 disabled） */}

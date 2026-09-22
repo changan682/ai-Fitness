@@ -2,6 +2,8 @@ package com.fitness.client;
 
 import com.fitness.config.AiProperties;
 import com.fitness.dto.ai.PyAgentHealthData;
+import com.fitness.dto.ai.PyBodyConsultData;
+import com.fitness.dto.ai.PyBodyConsultRequest;
 import com.fitness.dto.ai.PyChatData;
 import com.fitness.dto.ai.PyChatRequest;
 import com.fitness.dto.ai.PyKnowledgeHealthData;
@@ -47,6 +49,7 @@ public class AiPythonClient {
     private static final String PATH_RECOMMEND = "/agent/v1/recommend";
     private static final String PATH_POSE = "/agent/v1/pose-evaluate";
     private static final String PATH_CHAT = "/agent/v1/chat";
+    private static final String PATH_BODY_CONSULT = "/agent/v1/body-consult";
     private static final String PATH_HEALTH = "/agent/v1/health";
     private static final String PATH_KNOWLEDGE_HEALTH = "/agent/v1/knowledge/health";
 
@@ -120,6 +123,17 @@ public class AiPythonClient {
     public PyKnowledgeHealthData knowledgeHealth() {
         return get(PATH_KNOWLEDGE_HEALTH,
                 new ParameterizedTypeReference<PythonEnvelope<PyKnowledgeHealthData>>() {});
+    }
+
+    /**
+     * 身体状态主动问询（体验优化批次 D）
+     * <p>
+     * 请求体是 Java 组装好的"身体状态快照"，Python 只负责生成追问与建议
+     * （它不查库，取数口径只写在 Java 一处）。
+     */
+    public PyBodyConsultData bodyConsult(PyBodyConsultRequest request) {
+        return post(PATH_BODY_CONSULT, request,
+                new ParameterizedTypeReference<PythonEnvelope<PyBodyConsultData>>() {});
     }
 
     // ==================== 内部通用逻辑 ====================

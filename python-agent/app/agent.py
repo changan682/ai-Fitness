@@ -29,6 +29,10 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from .config import settings
 from .models import (
     ActionRecommendation,
+    BodyConsultQuestion,
+    BodyConsultResponse,
+    BodyConsultRiskFlag,
+    BodyConsultSuggestion,
     ChatResponse,
     ChatSource,
     HealthData,
@@ -2660,3 +2664,391 @@ def generate_weekly_plan(message: dict) -> str:
         f"{weight_change:+.1f}", len(plan),
     )
     return plan
+
+
+# ============================================================
+# 身体状态主动问询（体验优化批次 D）
+# ============================================================
+
+BODY_CONSULT_SYSTEM_PROMPT = """你是一位会"追问"的健身教练，需要根据学员最近的身体数据主动提问并给建议。
+
+## 任务
+基于下方【身体状态快照】生成 4 部分内容。**只能使用快照里出现过的数字**，不要编造任何未给出的数据。
+
+## 输出要求（只返回 JSON，不要 Markdown 代码块）
+{{
+  "assessment": "2-3 句整体判断，必须引用具体数字",
+  "trend_summary": "体重/围度的走向与幅度（含数值与时间范围）",
+  "questions": [
+    {{"id": "q1", "text": "要问学员的问题（具体、可回答）", "why": "为什么问这个（关联哪个数据）"}}
+  ],
+  "suggestions": [
+    {{"title": "建议标题（6-12 字）", "detail": "具体做法，1-2 句"}}
+  ],
+  "risk_flags": [
+    {{"level": "info|warn|high", "text": "风险或提示"}}
+  ]
+}}
+
+## 硬性规则
+1. questions 最多 3 条、suggestions 最多 3 条、risk_flags 最多 3 条，可以为空数组。
+2. 数据不足时（例如只有 1 条体测、没有训练记录）不要硬编建议，改为在 questions 里问清楚情况。
+3. 体重单周变化超过 1%、腰围连续上升、7 天零训练、平均 RPE ≥ 9 这类信号必须体现在 risk_flags 里。
+4. 涉及疼痛、伤病、用药、极端节食时，level 用 "high"，并在 text 里明确"建议就医/咨询专业人士"。
+5. 不做医疗诊断，不下"你有 XX 病"这类结论。
+6. 语气像教练，不要空话（"坚持就是胜利"这类一律不要）。
+
+【身体状态快照】
+{snapshot}"""
+
+
+def body_consult(payload: Dict[str, Any]) -> BodyConsultResponse:
+    """身体状态主动问询（体验优化批次 D）。
+
+    **两条路径**：
+    1. 有大模型 → 让它基于快照生成追问与建议（``data_source="llm"``）；
+    2. 无大模型 / 调用失败 / 返回不可解析 → **阈值规则引擎**兜底
+       （``data_source="rule_based"``，前端会标注「规则生成（未使用大模型）」）。
+
+    为什么要有规则兜底：这个功能的卖点是"AI 主动关心你"，若没有 Key 就整个不可用，
+    体验上等于没做。规则版只用快照里的数字做判断，虽然不如大模型灵活，
+    但**每一句都有数据支撑**，比编造一段漂亮话强。
+    """
+    latest = payload.get("latest_metric") or {}
+    trend = payload.get("trend7d") or {}
+    training = payload.get("training7d") or {}
+
+    # 数据太少时不必花 token：连一次体测都没有，大模型也无从分析
+    if not latest and not payload.get("prev_metric"):
+        logger.info("身体状态问询：无任何体测数据，直接用规则回复（不调大模型）")
+        return _body_consult_rules(payload, reason="尚无体测记录，未调用大模型")
+
+    from .llm import get_llm
+
+    llm = get_llm()
+    if not llm.configured or settings.mock_mode:
+        reason = "MOCK_MODE=true" if settings.mock_mode else "未配置 DEEPSEEK_API_KEY"
+        logger.info("身体状态问询：%s，使用规则引擎", reason)
+        return _body_consult_rules(payload, reason=f"{reason}，已改用规则引擎生成")
+
+    snapshot = _format_body_snapshot(payload)
+    try:
+        raw = llm.chat_with_system(
+            BODY_CONSULT_SYSTEM_PROMPT.format(snapshot=snapshot),
+            "请按系统提示的要求，只返回 JSON。",
+            temperature=0.4,
+            max_tokens=900,
+        )
+        parsed = extract_json_object(raw)
+        result = _build_body_consult_from_llm(parsed)
+        if result is None:
+            raise ValueError("大模型返回的 JSON 结构不可用")
+        logger.info(
+            "身体状态问询完成(LLM): 追问=%d 建议=%d 风险=%d",
+            len(result.questions), len(result.suggestions), len(result.risk_flags),
+        )
+        return result
+    except Exception as exc:  # noqa: BLE001 - 兜底是本函数的职责
+        logger.warning("身体状态问询调用大模型失败，改用规则引擎: %s: %s", type(exc).__name__, exc)
+        return _body_consult_rules(payload, reason=f"大模型不可用（{type(exc).__name__}），已改用规则引擎生成")
+
+
+def _format_body_snapshot(payload: Dict[str, Any]) -> str:
+    """把快照整理成给人（其实是给模型）看的分行文本。
+
+    直接塞 JSON 也能跑，但模型对"字段名 + 数字 + 单位"的文本更稳，
+    而且出现解析异常时日志里更好读。
+    """
+    profile = payload.get("profile") or {}
+    latest = payload.get("latest_metric") or {}
+    prev = payload.get("prev_metric") or {}
+    trend = payload.get("trend7d") or {}
+    training = payload.get("training7d") or {}
+
+    lines: List[str] = ["【档案】"]
+    lines.append(
+        f"- 性别={profile.get('gender')} 身高={profile.get('height')}cm "
+        f"目标={profile.get('training_goal')} 年限={profile.get('training_level')}"
+    )
+    injuries = profile.get("injury_record") or []
+    lines.append(f"- 伤病记录={'、'.join(str(i) for i in injuries) if injuries else '无'}")
+
+    lines.append("【体测】")
+    if latest:
+        lines.append(
+            f"- 最新({latest.get('record_date')})：体重={latest.get('weight_kg')}kg "
+            f"腰围={latest.get('waist_cm')}cm 臂围={latest.get('arm_cm')}cm "
+            f"腿围={latest.get('leg_cm')}cm 体脂={latest.get('body_fat_pct')}%"
+        )
+    else:
+        lines.append("- 无体测记录")
+    if prev:
+        lines.append(
+            f"- 上一次({prev.get('record_date')})：体重={prev.get('weight_kg')}kg "
+            f"腰围={prev.get('waist_cm')}cm"
+        )
+
+    lines.append("【近 7 天趋势】")
+    lines.append(
+        f"- 体重变化={trend.get('weight_delta')}kg 腰围变化={trend.get('waist_delta')}cm "
+        f"体重均值={trend.get('weight_avg7d')}kg 体测样本={trend.get('samples')} 条"
+    )
+
+    lines.append("【近 7 天训练】")
+    lines.append(
+        f"- 训练次数={training.get('sessions')} 总容量={training.get('total_volume')}kg "
+        f"平均RPE={training.get('avg_rpe')} 涉及肌群={'、'.join(training.get('muscles') or []) or '无'}"
+    )
+    lines.append(f"【近 7 天饮食】- 有记录天数={payload.get('diet_days_recorded')}")
+    return "\n".join(lines)
+
+
+def _build_body_consult_from_llm(parsed: Dict[str, Any]) -> Optional[BodyConsultResponse]:
+    """把大模型返回的 JSON 转成响应模型；结构不可用时返回 None（交给调用方降级）。"""
+    if not isinstance(parsed, dict):
+        return None
+
+    assessment = str(parsed.get("assessment") or "").strip()
+    trend_summary = str(parsed.get("trend_summary") or "").strip()
+    if not assessment:
+        return None
+
+    questions: List[BodyConsultQuestion] = []
+    for index, item in enumerate(_as_dict_list(parsed.get("questions"))[:3], start=1):
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        questions.append(BodyConsultQuestion(
+            id=str(item.get("id") or f"q{index}"),
+            text=text,
+            why=str(item.get("why") or "").strip() or "为了更准确地给建议",
+        ))
+
+    suggestions: List[BodyConsultSuggestion] = []
+    for item in _as_dict_list(parsed.get("suggestions"))[:3]:
+        title = str(item.get("title") or "").strip()
+        detail = str(item.get("detail") or "").strip()
+        if title and detail:
+            suggestions.append(BodyConsultSuggestion(title=title, detail=detail))
+
+    risk_flags: List[BodyConsultRiskFlag] = []
+    for item in _as_dict_list(parsed.get("risk_flags"))[:3]:
+        text = str(item.get("text") or "").strip()
+        level = str(item.get("level") or "info").strip().lower()
+        if text and level in ("info", "warn", "high"):
+            risk_flags.append(BodyConsultRiskFlag(level=level, text=text))
+
+    return BodyConsultResponse(
+        assessment=assessment,
+        trend_summary=trend_summary or "本周数据样本较少，趋势暂不明显。",
+        questions=questions,
+        suggestions=suggestions,
+        risk_flags=_ensure_medical_note(risk_flags, assessment + trend_summary),
+        data_source="llm",
+        degraded=False,
+        degradation_reason=None,
+        generated_at=now_local(),
+    )
+
+
+def _as_dict_list(value: Any) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _ensure_medical_note(
+    flags: List[BodyConsultRiskFlag], text: str
+) -> List[BodyConsultRiskFlag]:
+    """命中医疗关键词但模型没给 high 提示时，补一条（与 RAG 问答同一条规则）。
+
+    这一层刻意不由模型决定：模型偶尔会漏，而"建议就医"漏掉是安全底线问题。
+    """
+    if not _needs_medical_note(text):
+        return flags
+    if any(flag.level == "high" for flag in flags):
+        return flags
+    return flags + [BodyConsultRiskFlag(
+        level="high",
+        text="你的描述涉及疼痛或伤病，个体差异很大，建议先咨询医生或康复教练再调整训练。",
+    )]
+
+
+def _body_consult_rules(payload: Dict[str, Any], reason: str) -> BodyConsultResponse:
+    """阈值规则兜底：只用快照里的真实数字做判断，每条追问/建议都能追溯到某个字段。
+
+    规则清单（与计划书 §3.4 一致）：
+    - 体重单次变化 >1% → 追问是水分/饮食还是刻意增减压
+    - 腰围上升 → 提示热量盈余方向 + 追问饮食执行
+    - 7 天零训练 → 追问原因（作息/伤病/时间）
+    - 平均 RPE ≥ 9 → 过度训练预警 + 追问恢复
+    - 体脂率缺失 → 建议补充
+    - 体测样本 < 2 → 不硬编趋势，只提示多记几次
+    """
+    profile = payload.get("profile") or {}
+    latest = payload.get("latest_metric") or {}
+    prev = payload.get("prev_metric") or {}
+    trend = payload.get("trend7d") or {}
+    training = payload.get("training7d") or {}
+
+    questions: List[BodyConsultQuestion] = []
+    suggestions: List[BodyConsultSuggestion] = []
+    flags: List[BodyConsultRiskFlag] = []
+    trend_lines: List[str] = []
+
+    samples = to_int(trend.get("samples")) or 0
+    if not latest:
+        assessment = "你还没有记录过身体数据，我先不做判断 —— 记两次以上才能看出趋势。"
+        questions.append(BodyConsultQuestion(
+            id="q1", text="方便称一下体重并量一下腰围吗？",
+            why="有了第一条记录，之后的变化才有对比基准",
+        ))
+        suggestions.append(BodyConsultSuggestion(
+            title="建立记录习惯",
+            detail="建议每周固定 2-3 次、晨起空腹称重，并顺手量一次腰围 —— 腰围比体重更能反映体脂变化。",
+        ))
+        return _wrap_rule_response(assessment, "样本不足，暂不判断趋势。", questions, suggestions,
+                                   flags, reason)
+
+    weight = to_float(latest.get("weight_kg"))
+    prev_weight = to_float(prev.get("weight_kg"))
+    waist = to_float(latest.get("waist_cm"))
+    prev_waist = to_float(prev.get("waist_cm"))
+    goal = str(profile.get("training_goal") or "保持")
+
+    # --- 档案里的伤病：必须主动提出来 ---
+    # 用户自己填了伤病，AI 却像没看见一样给"加量"建议，是这个功能最容易出的事故。
+    # 放在最前面，保证它不会被后面的 flags 挤出 3 条上限。
+    injuries = [str(i) for i in (profile.get("injury_record") or []) if str(i).strip()]
+    if injuries:
+        flags.append(BodyConsultRiskFlag(
+            level="high",
+            text=f"你的档案里记录了伤病（{'、'.join(injuries)}）：这类情况个体差异很大，"
+                 "建议先在医生或康复教练指导下确认可以做哪些动作，再谈加量。",
+        ))
+
+    # --- 体重变化 ---
+    if weight is not None and prev_weight is not None and prev_weight > 0:
+        delta = weight - prev_weight
+        pct = abs(delta) / prev_weight * 100
+        trend_lines.append(
+            f"体重从 {fmt_num(prev_weight)}kg 变为 {fmt_num(weight)}kg（{delta:+.1f}kg，{pct:.1f}%）"
+        )
+        if pct > 1.0:
+            questions.append(BodyConsultQuestion(
+                id="q1",
+                text=f"这次体重变化了 {delta:+.1f}kg，是刻意调整饮食，还是最近作息/饮水变化比较大？",
+                why="单次超过 1% 的变化，水分与进食时间的影响往往比脂肪更大",
+            ))
+            flags.append(BodyConsultRiskFlag(
+                level="info",
+                text=f"体重变化 {pct:.1f}%（{delta:+.1f}kg）：建议固定在晨起空腹、排便后称重，减少水分干扰。",
+            ))
+    else:
+        trend_lines.append("体重样本不足两条，暂不判断变化")
+
+    # --- 腰围 ---
+    if waist is not None and prev_waist is not None:
+        waist_delta = waist - prev_waist
+        trend_lines.append(f"腰围从 {fmt_num(prev_waist)}cm 变为 {fmt_num(waist)}cm（{waist_delta:+.1f}cm）")
+        if waist_delta > 0:
+            flags.append(BodyConsultRiskFlag(
+                level="warn",
+                text=f"腰围上升 {waist_delta:+.1f}cm：若目标是减脂，说明当前热量大概率仍有盈余。",
+            ))
+            questions.append(BodyConsultQuestion(
+                id="q2",
+                text="最近一周的饮食有记录吗？大概每天几餐、有没有加餐或含糖饮料？",
+                why="腰围上升通常先反映在热量摄入上，比体重更灵敏",
+            ))
+            suggestions.append(BodyConsultSuggestion(
+                title="先控热量缺口",
+                detail="把主食与油脂各减 10-15%，保持蛋白质不变，观察两周腰围再决定是否继续下调。",
+            ))
+        elif waist_delta < 0:
+            flags.append(BodyConsultRiskFlag(
+                level="info", text=f"腰围下降 {abs(waist_delta):.1f}cm，方向正确，保持当前节奏即可。",
+            ))
+
+    # --- 体脂率缺失 ---
+    if latest.get("body_fat_pct") in (None, "", 0):
+        questions.append(BodyConsultQuestion(
+            id="q3", text="有条件的话，能补一次体脂率吗？",
+            why="体重与腰围看不出掉的是脂肪还是肌肉，体脂率能补上这一块",
+        ))
+
+    # --- 训练量 ---
+    sessions = to_int(training.get("sessions")) or 0
+    avg_rpe = to_float(training.get("avg_rpe"))
+    if sessions == 0:
+        flags.append(BodyConsultRiskFlag(
+            level="warn", text="近 7 天没有训练记录：连续停练会让力量与肌肉量下降得比想象中快。",
+        ))
+        questions.append(BodyConsultQuestion(
+            id="q4", text="这周没练是行程/时间问题，还是身体有不适？",
+            why="停练原因不同，恢复训练的强度安排完全不同",
+        ))
+    elif avg_rpe is not None and avg_rpe >= 9:
+        flags.append(BodyConsultRiskFlag(
+            level="high", text=f"平均 RPE {fmt_num(avg_rpe)} 偏高：长期接近力竭容易累积疲劳与伤病。",
+        ))
+        questions.append(BodyConsultQuestion(
+            id="q5", text="最近睡眠和食欲怎么样？有没有持续的关节酸痛？",
+            why="RPE 持续偏高时，恢复能力往往已经跟不上训练量",
+        ))
+        suggestions.append(BodyConsultSuggestion(
+            title="下调训练强度",
+            detail="把主要动作的 RPE 控制在 7-8，每周至少留 1 天完全休息，观察两周。",
+        ))
+    elif sessions >= 5:
+        flags.append(BodyConsultRiskFlag(
+            level="info", text=f"近 7 天训练 {sessions} 次，频率不低，注意安排至少 1 天主动恢复。",
+        ))
+
+    # --- 样本不足 ---
+    if samples < 2:
+        trend_lines.append("体测样本少于 2 条，趋势判断仅供参考")
+        suggestions.append(BodyConsultSuggestion(
+            title="把记录补齐",
+            detail="每周固定记录 2-3 次体重与腰围，两周后才能看出真实趋势。",
+        ))
+
+    # --- 目标导向的兜底建议（保证 suggestions 不为空） ---
+    if not suggestions:
+        suggestions.append(BodyConsultSuggestion(
+            title="保持当前节奏",
+            detail=f"目标为「{goal}」时，训练量周增幅控制在 5-10%，并保持每周 2-3 次体测记录。",
+        ))
+
+    assessment = (
+        f"最新一次体测记录于 {latest.get('record_date')}：体重 {fmt_num(weight)}kg"
+        + (f"、腰围 {fmt_num(waist)}cm" if waist is not None else "")
+        + f"；近 7 天训练 {sessions} 次。"
+    )
+
+    return _wrap_rule_response(
+        assessment,
+        "；".join(trend_lines) + "。",
+        questions[:3], suggestions[:3], flags[:3], reason,
+    )
+
+def _wrap_rule_response(
+    assessment: str,
+    trend_summary: str,
+    questions: List[BodyConsultQuestion],
+    suggestions: List[BodyConsultSuggestion],
+    flags: List[BodyConsultRiskFlag],
+    reason: str,
+) -> BodyConsultResponse:
+    return BodyConsultResponse(
+        assessment=assessment,
+        trend_summary=trend_summary,
+        questions=questions,
+        suggestions=suggestions,
+        risk_flags=_ensure_medical_note(flags, assessment + trend_summary),
+        # 规则生成必须自报家门：前端据此显示「规则生成（未使用大模型）」
+        data_source="rule_based",
+        degraded=True,
+        degradation_reason=reason,
+        generated_at=now_local(),
+    )

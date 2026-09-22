@@ -4,6 +4,7 @@ import com.fitness.cache.TokenBlacklistService;
 import com.fitness.exception.GlobalExceptionHandler;
 import com.fitness.service.AiProxyService;
 import com.fitness.service.AiSummaryService;
+import com.fitness.service.BodyConsultService;
 import com.fitness.util.JwtUtil;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -49,6 +50,10 @@ class AiRequestShapeTest {
 
     @MockBean
     private AiProxyService aiProxyService;
+
+    /** 批次 D 新增的控制器依赖：@WebMvcTest 只扫 Web 层，必须替它补上 mock */
+    @MockBean
+    private BodyConsultService bodyConsultService;
 
     // JwtInterceptor 会被 @WebMvcTest 一起扫进来（HandlerInterceptor 在其包含列表内），
     // 而 WebConfig 又依赖它，因此必须替它补上依赖，否则上下文起不来。

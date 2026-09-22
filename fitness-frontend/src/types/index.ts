@@ -97,6 +97,10 @@ export type {
   ChatRequest,
   ChatResponse,
   ChatMessage,
+  BodyConsultQuestion,
+  BodyConsultSuggestion,
+  BodyConsultRiskFlag,
+  BodyConsultResponse,
   KnowledgeHealth,
 } from './ai'
 

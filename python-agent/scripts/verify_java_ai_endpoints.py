@@ -168,6 +168,26 @@ def main() -> int:
     print(f"    collection={data.get('collectionName')} index={data.get('indexType')} "
           f"docs={data.get('totalDocuments')}")
 
+    # ---------------- 5.5) 身体状态主动问询（体验优化批次 D） ----------------
+    print("\n[5.5] POST /api/ai/body-consult")
+    r = httpx.post(f"{base}/api/ai/body-consult", headers=headers, timeout=120)
+    body = r.json()
+    data = body.get("data") or {}
+    check("HTTP 200 且 code=0（无体测数据也不能报错）",
+          r.status_code == 200 and body.get("code") == 0,
+          f"code={body.get('code')} msg={body.get('msg')}")
+    check("字段为前端 camelCase 契约",
+          all(k in data for k in ("assessment", "trendSummary", "questions", "suggestions",
+                                  "riskFlags", "dataSource", "degraded", "cached")),
+          f"实际字段={sorted(data.keys())}")
+    check("dataSource 必须是 llm 或 rule_based（不允许什么都不标）",
+          data.get("dataSource") in ("llm", "rule_based"), str(data.get("dataSource")))
+    check("有实质内容（评估非空）", bool(data.get("assessment")),
+          f"assessment={str(data.get('assessment'))[:40]!r}")
+    print(f"    dataSource={data.get('dataSource')} cached={data.get('cached')} "
+          f"追问={len(data.get('questions') or [])} 建议={len(data.get('suggestions') or [])} "
+          f"风险={len(data.get('riskFlags') or [])}")
+
     # ---------------- 错误路径 ----------------
     print("\n[6] 错误路径")
     # 6a) 真正的 multipart 请求，但漏传 image 部分

@@ -33,6 +33,7 @@ from .config import settings
 from .middleware import TraceIdMiddleware
 from .models import (
     AgentResponse,
+    BodyConsultRequest,
     ChatRequest,
     PoseEvaluateRequest,
     RecommendRequest,
@@ -295,6 +296,31 @@ def chat(request: ChatRequest) -> AgentResponse:
         history=[turn.model_dump() for turn in (request.history or [])],
     )
     logger.info("知识库问答响应: sources=%d", len(result.sources))
+    return _ok(result.model_dump(mode="json"))
+
+
+@router.post("/body-consult", response_model=AgentResponse,
+             summary="身体状态主动问询（体验优化批次 D）")
+def body_consult(request: BodyConsultRequest) -> AgentResponse:
+    """基于用户最近的身体/训练数据**主动提问 + 给建议**。
+
+    与其它 AI 接口的区别：它不是"用户问、系统答"，而是系统先看数据再发问。
+    取数与口径全在 Java 侧完成（Python 不查库），这里只负责人工智能那部分：
+    有大模型就让它生成，没有就退回阈值规则 —— 后者会如实标注
+    ``data_source="rule_based"``，前端据此提示「规则生成（未使用大模型）」。
+    """
+    logger.info(
+        "收到身体状态问询: userId=%s 有最新体测=%s 体测样本=%s 近7天训练=%s 次",
+        request.user_id,
+        bool(request.latest_metric),
+        (request.trend7d or {}).get("samples"),
+        (request.training7d or {}).get("sessions"),
+    )
+    result = agent.body_consult(request.model_dump())
+    logger.info(
+        "身体状态问询响应: data_source=%s 追问=%d 建议=%d 风险=%d",
+        result.data_source, len(result.questions), len(result.suggestions), len(result.risk_flags),
+    )
     return _ok(result.model_dump(mode="json"))
 
 

@@ -2,6 +2,7 @@ package com.fitness.controller;
 
 import com.fitness.common.BaseController;
 import com.fitness.common.Result;
+import com.fitness.dto.AiBodyConsultResponse;
 import com.fitness.dto.AiChatRequest;
 import com.fitness.dto.AiChatResponse;
 import com.fitness.dto.AiKnowledgeHealthResponse;
@@ -12,6 +13,7 @@ import com.fitness.dto.AiSummaryRequest;
 import com.fitness.dto.AiSummaryResponse;
 import com.fitness.service.AiProxyService;
 import com.fitness.service.AiSummaryService;
+import com.fitness.service.BodyConsultService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -38,6 +40,7 @@ public class AIController extends BaseController {
 
     private final AiSummaryService aiSummaryService;
     private final AiProxyService aiProxyService;
+    private final BodyConsultService bodyConsultService;
 
     /**
      * 7.1 生成训练智能总结 ⭐MVP核心
@@ -94,5 +97,17 @@ public class AIController extends BaseController {
     @GetMapping("/knowledge/health")
     public Result<AiKnowledgeHealthResponse> knowledgeHealth() {
         return Result.ok(aiProxyService.knowledgeHealth());
+    }
+
+    /**
+     * 7.7 身体状态主动问询（体验优化批次 D）
+     * <p>
+     * 与其它 AI 接口最大的不同：它不接收"问题"，而是让 AI 先看用户的身体数据再发问。
+     * 无请求体 —— 所有输入都由服务端从库里取（用户 id 只从 Token 取，
+     * 否则就成了"可以随便查别人身体状况"的接口）。
+     */
+    @PostMapping("/body-consult")
+    public Result<AiBodyConsultResponse> bodyConsult(HttpServletRequest request) {
+        return Result.ok(bodyConsultService.consult(getUserId(request)));
     }
 }

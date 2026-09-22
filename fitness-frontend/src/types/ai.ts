@@ -179,6 +179,74 @@ export interface ChatMessage {
   degradationReason?: string | null
 }
 
+// ==================== 7.7 身体状态主动问询 ====================
+
+/**
+ * 一条「主动追问」
+ * <p>
+ * `why` 不是装饰：它说明「为什么要问这个」，用户才知道值不值得回答。
+ * 缺了它，这三条问题看起来就像随机生成的问卷。
+ */
+export interface BodyConsultQuestion {
+  /** 问题 id（后端生成，前端只用于 key/埋点，不要当业务标识用） */
+  id: string
+  /** 问题文本；前端会把 `questions[0].text` 直接丢进问答的 send() */
+  text: string
+  /** 问这个问题的理由（灰色小字展示） */
+  why: string
+}
+
+/** 一条建议 */
+export interface BodyConsultSuggestion {
+  title: string
+  detail: string
+}
+
+/**
+ * 一条风险提示
+ * <p>
+ * `level` 是**语义级别**，不是颜色：由前端决定怎么画（info→蓝色提示、warn→黄色警告、high→红色错误），
+ * 后端不该知道界面用什么组件。
+ */
+export interface BodyConsultRiskFlag {
+  level: 'info' | 'warn' | 'high'
+  text: string
+}
+
+/**
+ * 身体状态主动问询响应（POST /ai/body-consult，无请求体）
+ * <p>
+ * ⚠️ 与问答一样有「诚实标记」的硬要求：`dataSource === 'rule_based'` 表示**这次回答完全由
+ * 后端规则拼出来、根本没调用大模型**。界面必须显式标注，否则用户会把规则模板当成 AI 的分析结论。
+ */
+export interface BodyConsultResponse {
+  /** 2-3 句整体判断 */
+  assessment: string
+  /** 趋势要点（含具体数值，如「近 7 天体重下降 0.8kg」） */
+  trendSummary: string
+  /** 最多 3 条主动追问 */
+  questions: BodyConsultQuestion[]
+  /** 最多 3 条建议 */
+  suggestions: BodyConsultSuggestion[]
+  /** 风险提示（可为空数组，表示没有发现需要提醒的点） */
+  riskFlags: BodyConsultRiskFlag[]
+  /**
+   * 结果来源
+   * <p>
+   * - `llm`：真实经过大模型
+   * - `rule_based`：**未使用大模型**，由后端规则兜底拼装 —— 界面必须标注
+   */
+  dataSource: 'llm' | 'rule_based' | string
+  /** 是否走了降级路径 */
+  degraded: boolean
+  /** 降级原因（中文说明），未降级时为 null */
+  degradationReason: string | null
+  /** yyyy-MM-dd HH:mm:ss */
+  generatedAt: string
+  /** 是否命中服务端缓存（命中说明内容可能不是刚生成的，展示时可提示） */
+  cached: boolean
+}
+
 // ==================== 7.5 知识库健康 ====================
 
 /**

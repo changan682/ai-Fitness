@@ -74,6 +74,14 @@ public final class CacheKeys {
      */
     public static final String AI_CHAT_SESSION = PREFIX + "ai:chat:session:";
 
+    /**
+     * 身体状态主动问询缓存 — String（JSON：响应 + 快照指纹）
+     * <p>
+     * key 只按 userId 维度（同一时刻只有"最新一份问询"有意义）；
+     * 值里带指纹，指纹变了就重新生成 —— 否则用户新记了一条体测却仍看到旧结论。
+     */
+    public static final String AI_BODY_CONSULT = PREFIX + "ai:body:consult:";
+
     // ==================== 分布式锁 Key 前缀（规范 3.1 / 3.2） ====================
 
     /** 定时任务防重锁 */
@@ -134,6 +142,15 @@ public final class CacheKeys {
      * （见 {@code AiChatSessionService#load}）。
      */
     public static final long AI_CHAT_SESSION_TTL_SECONDS = 7200;
+
+    /**
+     * 身体状态问询缓存 TTL = 12 小时
+     * <p>
+     * 比 AI 总结（24h）短、比会话（2h）长：体测数据一天最多变几次，
+     * 12 小时足够覆盖"用户反复打开页面看同一份结论"的场景，又不至于让结论明显过期。
+     * 真正的时效性由指纹保证（数据一变就重新生成），TTL 只是兜底清理。
+     */
+    public static final long AI_BODY_CONSULT_TTL_SECONDS = 12 * 3600L;
 
     // ==================== Key 构建方法（避免业务代码拼接裸 Key） ====================
 
@@ -197,6 +214,11 @@ public final class CacheKeys {
     /** AI 问答会话热层：ai:chat:session:{userId}:{sessionId} */
     public static String aiChatSession(Long userId, String sessionId) {
         return AI_CHAT_SESSION + userId + ":" + sessionId;
+    }
+
+    /** 身体状态问询缓存：ai:body:consult:{userId} */
+    public static String aiBodyConsult(Long userId) {
+        return AI_BODY_CONSULT + userId;
     }
 
     private CacheKeys() {

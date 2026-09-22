@@ -37,6 +37,8 @@ export default function ChatTab() {
   const [input, setInput] = useState('')
   const [category, setCategory] = useState<string | undefined>(undefined)
   const [sending, setSending] = useState(false)
+  /** 正在「根据身体状态生成问题」（与 sending 分开：这一步还没开始问答，气泡里不该有占位） */
+  const [consulting, setConsulting] = useState(false)
   /** 当前会话 id；首轮为空，由后端生成后回填（之后每轮都要带上，否则会"失忆"） */
   const [sessionId, setSessionId] = useState<string | undefined>(
     () => window.sessionStorage.getItem(SESSION_KEY) ?? undefined,
@@ -111,6 +113,36 @@ export default function ChatTab() {
   }
 
   /**
+   * 「让 AI 根据我的身体状态提问」
+   * <p>
+   * 两步走：先问后端「结合我的身体数据，你想问我什么」，拿到第一条问题后**直接交给 send()**。
+   * 复用 send 而不是自己再拼一次请求，是为了白拿会话记忆 ——
+   * 这条追问会落在当前会话里，用户接着问「为什么」时后端还记得上文，
+   * 自己发请求的话就成了一次孤立提问，界面里会多出一个没有上下文的问答。
+   */
+  const handleBodyConsult = async (): Promise<void> => {
+    if (consulting) return
+    setConsulting(true)
+    try {
+      const data = await aiApi.bodyConsult()
+      const first = data.questions?.[0]
+      // 没有可问的问题（身体数据太少等）时不要发空问题：那只会白烧一次问答的 token，
+      // 而且用户看到的是「AI 答非所问」，比什么都不发生更糟
+      if (!first) {
+        message.info('暂时没有可追问的问题，先记录几天身体数据吧')
+        return
+      }
+      await send(first.text)
+    } catch (e) {
+      message.error(
+        e instanceof ApiError && e.msg ? e.msg : 'AI 暂时不可用，请稍后再试',
+      )
+    } finally {
+      setConsulting(false)
+    }
+  }
+
+  /**
    * 「新对话」：切断上下文
    * <p>
    * 三件事缺一不可：
@@ -165,6 +197,18 @@ export default function ChatTab() {
         {messages.length === 0 && (
           <div className="py-6">
             <Empty description="试试问我这些问题" />
+            {/* 身体状态问询放在快捷提问上方：它是「让 AI 先开口」，比用户自己憋一个问题门槛更低 */}
+            <div className="mt-3 flex justify-center">
+              <Button
+                type="primary"
+                ghost
+                loading={consulting}
+                disabled={sending}
+                onClick={() => void handleBodyConsult()}
+              >
+                让 AI 根据我的身体状态提问
+              </Button>
+            </div>
             <div className="mt-3 flex flex-wrap justify-center gap-2">
               {QUICK_QUESTIONS.map((q) => (
                 <Button key={q} size="small" onClick={() => void send(q)}>

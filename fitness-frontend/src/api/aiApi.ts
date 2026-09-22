@@ -4,6 +4,7 @@ import type {
   AiRecommendResponse,
   AiSummaryRequest,
   AiSummaryResponse,
+  BodyConsultResponse,
   ChatRequest,
   ChatResponse,
   KnowledgeHealth,
@@ -61,6 +62,17 @@ export const aiApi = {
    */
   newChatSession: (sessionId: string): Promise<void> =>
     http.post<void>('/ai/chat/new-session', null, { params: { sessionId } }),
+
+  /**
+   * 7.7 身体状态主动问询（无请求体，后端按当前登录用户自己取身体数据/训练记录）
+   * <p>
+   * ⚠️ 只在**用户点击**「让 AI 看看我的变化」时才调用：
+   * ① 省 token —— 每次保存体测都自动问一次，用户一天记几条就是几次大模型调用；
+   * ② 不打扰 —— 用户录完体重后想要的是「记录成功」，不是突然弹出一屏追问。
+   * 因此调用方用 useMutation / `enabled: false` 手动触发，**不要挂在 useQuery 上自动 fetch**。
+   */
+  bodyConsult: (): Promise<BodyConsultResponse> =>
+    http.post<BodyConsultResponse>('/ai/body-consult', null, { timeout: AI_TIMEOUT_MS }),
 
   /** 7.5 Milvus 知识库健康检查 */
   knowledgeHealth: (): Promise<KnowledgeHealth> =>
