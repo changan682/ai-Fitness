@@ -158,6 +158,7 @@ vi.mock('@/api/aiApi', () => ({
     recommend: vi.fn(),
     evaluatePose: vi.fn(),
     chat: vi.fn(),
+    newChatSession: vi.fn(),
     knowledgeHealth: vi.fn(),
   },
 }))
@@ -459,6 +460,7 @@ describe('AI 标记的界面可见性', () => {
       dataSource: 'builtin',
       degraded: true,
       degradationReason: '知识库检索不可用，已退化为内置知识条目（相关度为启发式估计值）',
+      sessionId: '3f1c8b9e-6a2d-4f5b-9c7e-1d2a3b4c5d6e',
       generatedAt: '2026-09-21 12:00:00',
     })
 
@@ -496,6 +498,7 @@ describe('AI 标记的界面可见性', () => {
       dataSource: 'milvus',
       degraded: false,
       degradationReason: null,
+      sessionId: '3f1c8b9e-6a2d-4f5b-9c7e-1d2a3b4c5d6e',
       generatedAt: '2026-09-21 12:00:00',
     })
 
@@ -526,6 +529,7 @@ describe('AI 标记的界面可见性', () => {
       degraded: true,
       degradationReason:
         '知识库中未检索到与该问题相关的资料（大模型判定给定资料与问题无关，最高相似度 0.8206）',
+      sessionId: '3f1c8b9e-6a2d-4f5b-9c7e-1d2a3b4c5d6e',
       generatedAt: '2026-09-21 12:00:00',
     })
 
@@ -541,5 +545,80 @@ describe('AI 标记的界面可见性', () => {
 
     // 2) 不能展示任何来源（否则用户会以为回答有依据）
     expect(screen.queryByText(/参考来源/)).not.toBeInTheDocument()
+  })
+})
+
+// ==================== 对话记忆（批次 C） ====================
+
+describe('对话记忆（sessionId）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('首轮不带 sessionId，之后每轮都带上后端返回的会话 id（否则追问会失忆）', async () => {
+    const aiApi = (await import('@/api/aiApi')).default
+    vi.mocked(aiApi.chat).mockResolvedValue({
+      question: '深蹲时膝盖可以超过脚尖吗？',
+      answer: '## 结论\n可以适度超过。',
+      sources: [],
+      dataSource: 'llm_only',
+      degraded: true,
+      degradationReason: '知识库中未检索到与该问题相关的资料',
+      sessionId: '3f1c8b9e-6a2d-4f5b-9c7e-1d2a3b4c5d6e',
+      generatedAt: '2026-09-22 19:00:00',
+    })
+
+    const user = userEvent.setup()
+    renderWithProviders(<AIAssistantPage />)
+
+    await user.click(await screen.findByRole('tab', { name: '💬 健身问答' }))
+    await user.click(await screen.findByRole('button', { name: '深蹲时膝盖可以超过脚尖吗？' }))
+    await waitFor(() => expect(aiApi.chat).toHaveBeenCalledTimes(1))
+
+    // 第一轮：不带 sessionId（后端会新建一个并返回）
+    expect(vi.mocked(aiApi.chat).mock.calls[0][0].sessionId).toBeUndefined()
+
+    // 第二轮必须把上一轮返回的 sessionId 带回去 —— 这一步漏了，"记忆"就是假的
+    const box = await screen.findByPlaceholderText(/输入问题/)
+    await user.type(box, '那做几组？')
+    await user.keyboard('{Enter}')
+    await waitFor(() => expect(aiApi.chat).toHaveBeenCalledTimes(2))
+    expect(vi.mocked(aiApi.chat).mock.calls[1][0].sessionId).toBe(
+      '3f1c8b9e-6a2d-4f5b-9c7e-1d2a3b4c5d6e',
+    )
+  })
+
+  it('「新对话」清空气泡并让后端清掉旧会话（只清界面不换会话 = 名不副实）', async () => {
+    const aiApi = (await import('@/api/aiApi')).default
+    vi.mocked(aiApi.chat).mockResolvedValue({
+      question: '深蹲时膝盖可以超过脚尖吗？',
+      answer: '## 结论\n可以适度超过。',
+      sources: [],
+      dataSource: 'milvus',
+      degraded: false,
+      degradationReason: null,
+      sessionId: '3f1c8b9e-6a2d-4f5b-9c7e-1d2a3b4c5d6e',
+      generatedAt: '2026-09-22 19:00:00',
+    })
+    vi.mocked(aiApi.newChatSession).mockResolvedValue(undefined)
+
+    const user = userEvent.setup()
+    renderWithProviders(<AIAssistantPage />)
+
+    await user.click(await screen.findByRole('tab', { name: '💬 健身问答' }))
+    await user.click(await screen.findByRole('button', { name: '深蹲时膝盖可以超过脚尖吗？' }))
+    await screen.findByText(/可以适度超过/)
+
+    await user.click(screen.getByRole('button', { name: /新对话/ }))
+    // modal.confirm 里的确认按钮（与触发按钮同名，取最后一个）
+    const buttons = await screen.findAllByRole('button', { name: '新对话' })
+    await user.click(buttons[buttons.length - 1])
+
+    await waitFor(() =>
+      expect(aiApi.newChatSession).toHaveBeenCalledWith('3f1c8b9e-6a2d-4f5b-9c7e-1d2a3b4c5d6e'),
+    )
+    // 气泡被清空：回到快捷提问的初始态
+    expect(await screen.findByText('试试问我这些问题')).toBeInTheDocument()
+    expect(window.sessionStorage.getItem('fitness-ai-chat-session')).toBeNull()
   })
 })

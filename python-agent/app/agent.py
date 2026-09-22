@@ -1896,7 +1896,10 @@ def _build_rag_answer(
 
 
 def chat_with_rag(
-    question: str, category: Optional[str] = None, user_id: Optional[int] = None
+    question: str,
+    category: Optional[str] = None,
+    user_id: Optional[int] = None,
+    history: Optional[List[dict]] = None,
 ) -> ChatResponse:
     """健身知识库 RAG 问答（规范 7.4）。
 
@@ -1925,9 +1928,11 @@ def chat_with_rag(
     if not text:
         raise AgentInputError("问题不能为空")
 
+    turns = _sanitize_history(history)
+
     # --- 第 1、2 层：真实链路 ---
     try:
-        return _chat_with_real_rag(text, category, user_id)
+        return _chat_with_real_rag(text, category, user_id, turns)
     except Exception as exc:  # noqa: BLE001 - 降级是本函数的职责
         logger.warning(
             "真实 RAG 链路不可用，降级到内置知识库: %s: %s", type(exc).__name__, exc
@@ -1935,6 +1940,73 @@ def chat_with_rag(
 
     # --- 第 3 层：离线兜底 ---
     return _chat_with_mock_knowledge(text, category, user_id)
+
+
+#: 上下文窗口上限（与 Java 侧 AiChatSessionService 的取值一致；两边都截断，谁都不信谁）
+MAX_HISTORY_TURNS = 6
+MAX_HISTORY_CHARS = 4000
+MAX_HISTORY_MESSAGE_CHARS = 2000
+
+
+def _sanitize_history(history: Optional[List[dict]]) -> List[dict]:
+    """清洗对话历史，返回可直接塞进 messages 的 ``[{role, content}]``。
+
+    <h3>为什么不能直接信任上游传来的 history</h3>
+    它是从 HTTP 请求体进来的（Java → Python），即使 Java 侧已经截断过一次，
+    这里也要再做一遍 —— 这是**唯一**能被外部数据影响 prompt 结构的入口：
+
+    1. 只允许 ``user`` / ``assistant`` 两个角色：``system`` 会被直接丢弃，
+       否则调用方能塞一条 system 把 RAG 规则整个覆盖掉（提示词注入）；
+    2. 条数上限 6 轮（12 条）、总长 4000 字符、单条 2000 字符，
+       超出丢最早的 —— 既控 token 成本，也防"塞一坨文本把窗口顶爆"；
+    3. 不以 ``assistant`` 开头（模型看到没头没尾的回答会顺着瞎编）；
+    4. 空内容丢弃，避免出现 ``content: ""`` 触发大模型侧参数错误。
+    """
+    if not history:
+        return []
+
+    cleaned: List[dict] = []
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        content = str(item.get("content") or "").strip()
+        if role not in ("user", "assistant") or not content:
+            continue
+        cleaned.append({
+            "role": role,
+            "content": content[:MAX_HISTORY_MESSAGE_CHARS],
+        })
+
+    # 条数上限：保留最近的
+    max_messages = MAX_HISTORY_TURNS * 2
+    if len(cleaned) > max_messages:
+        cleaned = cleaned[-max_messages:]
+
+    # 长度上限：从后往前累加（刚说过的比很早的重要）
+    total = 0
+    for index in range(len(cleaned) - 1, -1, -1):
+        total += len(cleaned[index]["content"])
+        if total > MAX_HISTORY_CHARS:
+            cleaned = cleaned[index + 1:]
+            break
+
+    # 不以 assistant 开头
+    if cleaned and cleaned[0]["role"] == "assistant":
+        cleaned = cleaned[1:]
+    return cleaned
+
+
+def _build_messages(system_prompt: str, question: str, history: List[dict]) -> List[dict]:
+    """组装发给大模型的 messages：system → 历史（时间正序）→ 本轮问题。
+
+    历史插在 system 之后、本轮问题之前，是 OpenAI 兼容接口的标准多轮格式；
+    把历史放在 system 之前会踩到部分实现的兼容差异，没必要冒险。
+    """
+    messages: List[dict] = [{"role": "system", "content": system_prompt}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": RAG_USER_PROMPT.format(question=question)})
+    return messages
 
 
 def _retrieval_threshold() -> float:
@@ -1951,11 +2023,16 @@ def _retrieval_threshold() -> float:
 
 
 def _chat_with_real_rag(
-    question: str, category: Optional[str], user_id: Optional[int]
+    question: str,
+    category: Optional[str],
+    user_id: Optional[int],
+    history: Optional[List[dict]] = None,
 ) -> ChatResponse:
     """真实 RAG 链路：Milvus 检索 + DeepSeek 生成。
 
     检索失败但 LLM 可用时，按规范降级为「纯 LLM 回答」并标注知识库不可用。
+    ``history`` 是已清洗过的多轮上下文（见 :func:`_sanitize_history`），
+    为空时行为与"没有记忆功能"完全一致。
     """
     from .llm import LLMError, get_llm
     from .rag import (
@@ -2054,9 +2131,8 @@ def _chat_with_real_rag(
         )
         system_prompt = RAG_SYSTEM_PROMPT.format(context=context_block)
 
-    raw_answer = llm.chat_with_system(
-        system_prompt,
-        RAG_USER_PROMPT.format(question=question),
+    raw_answer = llm.chat(
+        _build_messages(system_prompt, question, history or []),
         temperature=0.3,   # 知识问答要稳，降低发散
         max_tokens=1200,
     )

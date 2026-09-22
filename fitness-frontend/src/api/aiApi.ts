@@ -43,9 +43,24 @@ export const aiApi = {
     })
   },
 
-  /** 7.4 知识库 RAG 问答（带引用来源） */
+  /**
+   * 7.4 知识库 RAG 问答（带引用来源 + 对话记忆）
+   * <p>
+   * `sessionId` 决定这次提问能不能接上上文：首轮不传（后端生成并返回），
+   * 之后每轮都必须原样带回 —— 漏传的后果不是报错，而是"突然失忆"
+   * （追问"那做几组？"会答非所问），这类 bug 很难从报错里发现。
+   */
   chat: (data: ChatRequest): Promise<ChatResponse> =>
     http.post<ChatResponse>('/ai/chat', data, { timeout: AI_TIMEOUT_MS }),
+
+  /**
+   * 7.6 开启新对话：让后端清掉该会话的 Redis 热层
+   * <p>
+   * 前端换掉 sessionId 本身就已经"断开上下文"了，这里再调一次是为了顺手释放热层内存；
+   * 失败不影响使用，调用方无需处理错误。
+   */
+  newChatSession: (sessionId: string): Promise<void> =>
+    http.post<void>('/ai/chat/new-session', null, { params: { sessionId } }),
 
   /** 7.5 Milvus 知识库健康检查 */
   knowledgeHealth: (): Promise<KnowledgeHealth> =>

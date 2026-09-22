@@ -5,6 +5,7 @@ import com.fitness.cache.CacheKeys;
 import com.fitness.cache.DistributedLockUtil;
 import com.fitness.entity.User;
 import com.fitness.entity.WeeklyPlan;
+import com.fitness.repository.AiChatHistoryRepository;
 import com.fitness.repository.TrainingRecordRepository;
 import com.fitness.repository.UserRepository;
 import com.fitness.repository.WeeklyPlanRepository;
@@ -17,6 +18,7 @@ import org.springframework.stereotype.Component;
 
 import java.time.DayOfWeek;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.temporal.TemporalAdjusters;
 import java.util.List;
 import java.util.Map;
@@ -42,6 +44,10 @@ public class ScheduledTasks {
     private static final String TASK_DAILY_REMINDER = "dailyReminder";
     private static final String TASK_WEEKLY_STATS = "weeklyStats";
     private static final String TASK_WEEKLY_PLAN_MQ = "weeklyPlanMq";
+    private static final String TASK_CHAT_HISTORY_CLEANUP = "chatHistoryCleanup";
+
+    /** 问答历史保留天数（超过即物理删除） */
+    private static final int CHAT_HISTORY_RETENTION_DAYS = 90;
 
     private final DistributedLockUtil distributedLockUtil;
     private final TrainingRecordRepository trainingRecordRepository;
@@ -50,6 +56,7 @@ public class ScheduledTasks {
     private final StatsService statsService;
     private final WeeklyPlanProducer weeklyPlanProducer;
     private final ObjectMapper objectMapper;
+    private final AiChatHistoryRepository aiChatHistoryRepository;
 
     /**
      * 每日20:00 — 检查当天有无训练记录，无则推送提醒
@@ -181,6 +188,41 @@ public class ScheduledTasks {
                     weekStart, sent, failed, users.size());
         } catch (Exception e) {
             log.error("周计划MQ任务执行失败", e);
+        } finally {
+            distributedLockUtil.unlock(lockKey, lockValue);
+        }
+    }
+
+    /**
+     * 每日 03:00 — 清理 90 天前的 AI 问答历史（体验优化批次 C）
+     *
+     * <h3>为什么必须有个清理任务，而不是"留着也无所谓"</h3>
+     * 问答历史是**每次提问都会写两条**的表：活跃用户一天几十条，一年就是上万条。
+     * 留着不删，这张表迟早变成全库最大的表，而它的价值只在于"最近几轮上下文"
+     * 与"近期回看"—— 90 天前的对话没人会翻。
+     *
+     * <h3>为什么物理删除而不是软删</h3>
+     * 软删只是把行标记一下，磁盘与索引开销照旧，清理的意义就没了。
+     * 对话属于低价值可弃数据，直接删更干净；真要长期留存，应当另做归档而非软删。
+     *
+     * 选 03:00 是为了避开 20:00 的每日提醒与周日 21:00 的周计划链路。
+     */
+    @Scheduled(cron = "0 0 3 * * ?", zone = "Asia/Shanghai")
+    public void cleanupChatHistory() {
+        String lockKey = CacheKeys.lockScheduled(TASK_CHAT_HISTORY_CLEANUP);
+        String lockValue = distributedLockUtil.tryLock(lockKey, 600);
+        if (lockValue == null) {
+            log.info("问答历史清理任务已被其他实例执行，跳过");
+            return;
+        }
+
+        try {
+            LocalDateTime deadline = LocalDateTime.now().minusDays(CHAT_HISTORY_RETENTION_DAYS);
+            int deleted = aiChatHistoryRepository.deleteByCreatedAtBefore(deadline);
+            log.info("=== 问答历史清理完成: 删除 {} 条（{} 之前，保留期 {} 天）===",
+                    deleted, deadline, CHAT_HISTORY_RETENTION_DAYS);
+        } catch (Exception e) {
+            log.error("问答历史清理失败", e);
         } finally {
             distributedLockUtil.unlock(lockKey, lockValue);
         }

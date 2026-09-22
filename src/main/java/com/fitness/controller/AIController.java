@@ -69,11 +69,25 @@ public class AIController extends BaseController {
         return Result.ok(aiProxyService.evaluatePose(image, actionName));
     }
 
-    /** 7.4 健身知识库 RAG 问答 ⭐Milvus核心 */
+    /** 7.4 健身知识库 RAG 问答 ⭐Milvus核心（含对话记忆） */
     @PostMapping("/chat")
     public Result<AiChatResponse> chat(HttpServletRequest request,
                                       @Valid @RequestBody AiChatRequest req) {
         return Result.ok(aiProxyService.chat(getUserId(request), req));
+    }
+
+    /**
+     * 7.6 开启新对话（体验优化批次 C）
+     * <p>
+     * 只清该会话的 Redis 热层，`t_ai_chat_history` 里的长期历史保留 ——
+     * 因此"新对话"的语义是"切断上下文"，而不是"删掉聊天记录"。
+     * 前端拿到新会话后应换一个 sessionId 继续提问。
+     */
+    @PostMapping("/chat/new-session")
+    public Result<Void> newChatSession(HttpServletRequest request,
+                                       @RequestParam(required = false) String sessionId) {
+        aiProxyService.resetChatSession(getUserId(request), sessionId);
+        return Result.ok("已开启新对话", null);
     }
 
     /** 7.5 Milvus 知识库健康检查 */

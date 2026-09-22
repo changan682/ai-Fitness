@@ -56,7 +56,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
         })
 @DisplayName("Python 协议契约：字段映射 + 5xx/业务失败分支")
 class AiProtocolContractTest {
-
     /** 每个用例通过它切换桩的响应，避免为每种场景各起一个服务 */
     private static final AtomicReference<String> SCENARIO = new AtomicReference<>("ok");
 
@@ -73,6 +72,15 @@ class AiProtocolContractTest {
 
     @Autowired
     private AiProxyService proxyService;
+
+    /**
+     * 问答记忆用桩替掉
+     * <p>
+     * 这个测试只关心「Java ↔ Python 的字段映射」，不该被 Redis/MySQL 拖进 Spring 上下文；
+     * 记忆本身（read-through / 落库 / 窗口裁剪）由 {@code AiChatSessionServiceTest} 覆盖。
+     */
+    @org.springframework.boot.test.mock.mockito.MockBean
+    private AiChatSessionService chatSessionService;
 
     // ==================== 1. 正常路径：字段映射必须逐字段正确 ====================
 

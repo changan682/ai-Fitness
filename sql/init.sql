@@ -349,3 +349,23 @@ ON DUPLICATE KEY UPDATE
     sort_order       = VALUES(sort_order),
     notes            = VALUES(notes);
 
+-- ==================== 11. AI 问答历史（长期记忆 — 体验优化批次 C） ====================
+-- 与 Redis 热层（fitness:cache:ai:chat:session:*，TTL 2 小时）组成两级记忆：
+--   Redis 负责"这几轮对话的上下文窗口"，本表负责"Redis 过期/重启后仍能续上"以及长期回看。
+-- msg_role 而不是 role：ROLE 是 MySQL 8.0 的保留字（CREATE ROLE 语句引入），
+-- 用 role 会让所有 SQL 必须写反引号，且 ORM 生成的语句容易漏。
+-- data_source / degraded 冗余进历史表：回看历史时前端仍能显示"这轮是降级回答"，
+-- 不必回头再算一遍 —— 与本项目"降级必须可见"的原则一致。
+CREATE TABLE IF NOT EXISTS t_ai_chat_history (
+    id          BIGINT       AUTO_INCREMENT  PRIMARY KEY,
+    user_id     BIGINT       NOT NULL        COMMENT '用户ID',
+    session_id  VARCHAR(36)  NOT NULL        COMMENT '会话ID（UUID）',
+    msg_role    VARCHAR(16)  NOT NULL        COMMENT '角色：user / assistant',
+    content     TEXT         NOT NULL        COMMENT '消息内容',
+    data_source VARCHAR(20)                  COMMENT 'assistant 行的来源标记：milvus/llm_only/builtin/none',
+    degraded    TINYINT      DEFAULT 0       COMMENT 'assistant 行是否为降级回答：0-否 1-是',
+    created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    INDEX       idx_user_session (user_id, session_id, id),
+    INDEX       idx_user_created (user_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI问答历史（长期记忆）';
+

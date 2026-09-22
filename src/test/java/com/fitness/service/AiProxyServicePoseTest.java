@@ -51,12 +51,16 @@ class AiProxyServicePoseTest {
     @Mock
     private AiPythonClient aiPythonClient;
 
+    /** 姿态评估这条路径用不到记忆，但仍要提供依赖（构造器注入是强制的） */
+    @Mock
+    private AiChatSessionService chatSessionService;
+
     private AiProxyService aiProxyService;
 
     @BeforeEach
     void setUp() {
         // AiProperties 是普通配置类，直接 new 即可（默认兜底文案与生产一致）
-        aiProxyService = new AiProxyService(aiPythonClient, new AiProperties());
+        aiProxyService = new AiProxyService(aiPythonClient, new AiProperties(), chatSessionService);
     }
 
     @Test

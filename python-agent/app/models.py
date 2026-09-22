@@ -95,10 +95,28 @@ class PoseEvaluateResponse(BaseModel):
 
 
 # --- RAG 问答 ---
+class ChatTurn(BaseModel):
+    """一条对话历史消息（role = user / assistant）。
+
+    由 Java 侧的对话记忆传下来：热层在 Redis、长期层在 ``t_ai_chat_history``；
+    Python 自己**不存**任何会话状态（保持无状态，便于横向扩容）。
+    """
+
+    role: str = Field(..., pattern="^(user|assistant)$")
+    content: str = Field(..., min_length=1)
+
+
 class ChatRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=500)
     category: Optional[str] = None  # 可选，按分类过滤
     user_id: Optional[int] = None
+    #: 对话历史（时间正序）。为空 = 单轮问答，行为与"加记忆功能"之前完全一致。
+    #: 服务端会再截断一次（条数/总长度），不信任调用方传来的长度。
+    #:
+    #: ⚠️ 必须是 Optional：Java 侧序列化 DTO 时会把**未设置的字段以 null 发出来**，
+    #: 若这里声明成 `List[ChatTurn] = []`，收到 `history: null` 会直接 422/9003
+    #: （实测踩过：`history: Input should be a valid list`）。空与 null 都按"无历史"处理。
+    history: Optional[List[ChatTurn]] = None
 
 
 class ChatSource(BaseModel):

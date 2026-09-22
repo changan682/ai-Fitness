@@ -13,7 +13,7 @@ import java.util.List;
  * 健身知识库 RAG 问答响应 — 对应规范 7.4
  */
 @Data
-@Builder
+@Builder(toBuilder = true)
 @NoArgsConstructor
 @AllArgsConstructor
 public class AiChatResponse {
@@ -29,16 +29,25 @@ public class AiChatResponse {
     private LocalDateTime generatedAt;
 
     /**
-     * 来源库：{@code milvus}=200 条真实知识库检索；{@code builtin}=内置 18 条兜底；
-     * {@code none}=没检索到来源（纯大模型回答）。
+     * 来源库与「这轮回答到底有没有用知识库」：
+     * {@code milvus}=基于 200 条真实知识库；{@code llm_only}=检索到了资料但判定无关、
+     * 改用大模型通用知识（来源为空）；{@code none}=没检索到来源；
+     * {@code builtin}=内置 18 条兜底。
      */
     private String dataSource;
 
-    /** 是否走了降级路径（检索失败/无命中、无 LLM Key 本地拼装、内置兜底） */
+    /** 是否走了降级路径（知识库没覆盖、检索失败/无命中、无 LLM Key 本地拼装、内置兜底） */
     private Boolean degraded;
 
     /** 降级原因（给人看的中文说明），未降级时为 null */
     private String degradationReason;
+
+    /**
+     * 会话 id —— 前端必须把它带回下一次提问，对话才连得上（体验优化批次 C）
+     * <p>
+     * 首轮请求不传，后端生成并返回；此后每次都要原样带上。
+     */
+    private String sessionId;
 
     /** 单条知识来源 */
     @Data

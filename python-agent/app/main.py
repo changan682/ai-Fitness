@@ -276,17 +276,23 @@ def pose_evaluate(request: PoseEvaluateRequest) -> AgentResponse:
 
 @router.post("/chat", response_model=AgentResponse, summary="知识库 RAG 问答")
 def chat(request: ChatRequest) -> AgentResponse:
-    """健身知识库问答（第 5-6 周走 Embedding → Milvus → LLM）。"""
+    """健身知识库问答（第 5-6 周走 Embedding → Milvus → LLM）。
+
+    ``history`` 由 Java 侧的对话记忆传下来（Redis 热层 / t_ai_chat_history 长期层），
+    Python 自己不带会话状态 —— 谁持有状态，谁就难水平扩容。
+    """
     logger.info(
-        "收到知识库问答请求: userId=%s category=%s questionLength=%d",
+        "收到知识库问答请求: userId=%s category=%s questionLength=%d 历史=%d 条",
         request.user_id,
         request.category,
         len(request.question or ""),
+        len(request.history or []),
     )
     result = agent.chat_with_rag(
         question=request.question,
         category=request.category,
         user_id=request.user_id,
+        history=[turn.model_dump() for turn in (request.history or [])],
     )
     logger.info("知识库问答响应: sources=%d", len(result.sources))
     return _ok(result.model_dump(mode="json"))

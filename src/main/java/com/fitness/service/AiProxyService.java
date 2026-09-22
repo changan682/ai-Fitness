@@ -61,6 +61,7 @@ public class AiProxyService {
 
     private final AiPythonClient aiPythonClient;
     private final AiProperties aiProperties;
+    private final AiChatSessionService chatSessionService;
 
     /** 7.2 动作智能推荐 */
     public AiRecommendResponse recommend(AiRecommendRequest req) {
@@ -171,17 +172,41 @@ public class AiProxyService {
     }
 
     /**
-     * 7.4 健身知识库 RAG 问答
+     * 7.4 健身知识库 RAG 问答（含对话记忆 — 体验优化批次 C）
      * <p>
      * 规范明确「不做缓存，每次实时检索」—— 知识库会持续追加条目，
-     * 缓存答案会让新知识失效。
+     * 缓存答案会让新知识失效。**注意区分**：这里不做的是"答案缓存"，
+     * 而会话上下文是必须带的 —— 没有它，用户的追问（"那做几组？"）会答非所问。
+     *
+     * <h3>一轮问答的完整流程</h3>
+     * <ol>
+     *   <li>解析 sessionId：缺失/非法格式 → 新建一个（前端下次带回来）；</li>
+     *   <li>取上下文：Redis 热层 → 未命中回表回填（read-through）；</li>
+     *   <li>连同上文一起送 Python；</li>
+     *   <li>把这一轮追加进记忆（Redis + 尽力而为落库）。</li>
+     * </ol>
+     * 记忆的任何一步失败都只降级为"这一轮没有上下文"，不影响用户拿到回答。
      */
     public AiChatResponse chat(Long userId, AiChatRequest req) {
-        return withFallback(aiProperties.getFallback().getChat(), () -> {
+        String sessionId = chatSessionService.normalizeSessionId(req.getSessionId());
+        if (sessionId == null) {
+            sessionId = chatSessionService.newSessionId();
+        }
+        List<AiChatSessionService.ChatTurn> history = chatSessionService.load(userId, sessionId);
+
+        AiChatResponse response = withFallback(aiProperties.getFallback().getChat(), () -> {
             PyChatRequest py = new PyChatRequest();
             py.setQuestion(req.getQuestion());
             py.setCategory(req.getCategory());
             py.setUserId(userId);
+            if (!history.isEmpty()) {
+                py.setHistory(history.stream().map(turn -> {
+                    PyChatRequest.Turn item = new PyChatRequest.Turn();
+                    item.setRole(turn.getRole());
+                    item.setContent(turn.getContent());
+                    return item;
+                }).toList());
+            }
 
             PyChatData data = aiPythonClient.chat(py);
 
@@ -210,6 +235,16 @@ public class AiProxyService {
                     .generatedAt(AiTimeUtil.parseIsoOrNow(data.getGeneratedAt()))
                     .build();
         });
+
+        // 无论走的是真实链路还是兜底文案，都要记住这一轮；否则用户看到回答却"下一句就失忆"
+        chatSessionService.appendTurn(userId, sessionId, req.getQuestion(), response.getAnswer(),
+                response.getDataSource(), Boolean.TRUE.equals(response.getDegraded()));
+        return response.toBuilder().sessionId(sessionId).build();
+    }
+
+    /** 「新对话」：只清 Redis 热层，长期历史保留（供后续"历史会话"能力使用） */
+    public void resetChatSession(Long userId, String sessionId) {
+        chatSessionService.clearHot(userId, chatSessionService.normalizeSessionId(sessionId));
     }
 
     /**

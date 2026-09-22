@@ -119,6 +119,14 @@ export interface ChatRequest {
    * 动作要领/营养饮食/恢复与伤病/训练计划/补剂科普。传其它值会退化为全库检索。
    */
   category?: string
+  /**
+   * 会话 id（可选）—— 对话记忆的钥匙
+   * <p>
+   * 不传 / 非法格式：后端当作新会话并生成一个返回；
+   * 之后每轮都要原样带上，否则后端不知道上文（追问"那做几组"必然答非所问）。
+   * 归属由服务端按「当前登录用户 + sessionId」把关，传别人的 id 也只得到自己的空会话。
+   */
+  sessionId?: string
 }
 
 /** 问答响应 */
@@ -141,6 +149,12 @@ export interface ChatResponse {
   degraded: boolean
   /** 降级原因（中文说明），未降级时为 null */
   degradationReason: string | null
+  /**
+   * 本次问答所属的会话 id —— 前端必须把它带回下一次提问，对话才连得上
+   * <p>
+   * 首轮请求不传，后端生成并返回；此后每次都原样带上。
+   */
+  sessionId: string
   /** yyyy-MM-dd HH:mm:ss */
   generatedAt: string
 }

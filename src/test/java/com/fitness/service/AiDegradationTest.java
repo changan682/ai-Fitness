@@ -62,6 +62,13 @@ class AiDegradationTest {
     @Autowired
     private AiProperties aiProperties;
 
+    /**
+     * 问答记忆用桩替掉 —— 本测试关注的是「Python 不可用时的降级文案」，
+     * 不该把 Redis/MySQL 一起拉进 Spring 上下文（记忆本身由 AiChatSessionServiceTest 覆盖）。
+     */
+    @org.springframework.boot.test.mock.mockito.MockBean
+    private AiChatSessionService chatSessionService;
+
     @Test
     @DisplayName("客户端层：连接失败应翻译为 AI_TIMEOUT(6001) 业务异常")
     void clientShouldTranslateConnectionFailureToBusinessException() {

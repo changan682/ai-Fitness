@@ -17,20 +17,30 @@ const QUICK_QUESTIONS = [
 /**
  * Tab 4 — 健身问答（Milvus RAG）
  *
- * <h3>对话历史为什么只放在 useState</h3>
- * 规范明确要求：不进 Zustand、离开页面不保留（避免敏感对话残留在全局状态里）。
- * 配合 Tabs 的 `destroyOnHidden`，切走再回来就是一段新对话。
+ * <h3>对话历史怎么存的（体验优化批次 C 后）</h3>
+ * 界面上的气泡仍然只放 `useState`（规范要求不进全局状态、离开页面不保留），
+ * 但**上下文由后端记住**：请求带上 `sessionId`，Java 侧把该会话最近几轮
+ * 从 Redis 热层取出来一起送给大模型。因此：
+ * - `sessionId` 存 `sessionStorage`：刷新页面还能接着上一段聊；
+ * - 关掉标签页即结束（不落 localStorage，避免敏感对话长期留痕）；
+ * - 点「新对话」= 换一个新的 sessionId（并顺手让后端清掉旧会话的热层）。
  *
  * <h3>引用来源</h3>
- * 后端返回的 `sources[].score` 是**真实 Milvus 余弦相似度**，
- * 因此这里把分数一并展示出来，便于判断检索质量。
+ * 后端返回的 `sources[].score` 口径由 `scoreType` 声明：
+ * `cosine` 才是真实 Milvus 余弦相似度，`heuristic` 是内置兜底的合成值。
  */
+const SESSION_KEY = 'fitness-ai-chat-session'
+
 export default function ChatTab() {
   const { message, modal } = App.useApp()
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [category, setCategory] = useState<string | undefined>(undefined)
   const [sending, setSending] = useState(false)
+  /** 当前会话 id；首轮为空，由后端生成后回填（之后每轮都要带上，否则会"失忆"） */
+  const [sessionId, setSessionId] = useState<string | undefined>(
+    () => window.sessionStorage.getItem(SESSION_KEY) ?? undefined,
+  )
   const bottomRef = useRef<HTMLDivElement | null>(null)
 
   // 每次回答后滚到底部（规范要求）
@@ -56,7 +66,14 @@ export default function ChatTab() {
     setSending(true)
 
     try {
-      const data = await aiApi.chat({ question, category })
+      const data = await aiApi.chat({ question, category, sessionId })
+
+      // 后端可能新建了会话：存下来，下一轮才有上下文
+      if (data.sessionId && data.sessionId !== sessionId) {
+        setSessionId(data.sessionId)
+        window.sessionStorage.setItem(SESSION_KEY, data.sessionId)
+      }
+
       setMessages((prev) =>
         prev.map((m) =>
           m.id === pendingId
@@ -93,16 +110,33 @@ export default function ChatTab() {
     }
   }
 
+  /**
+   * 「新对话」：切断上下文
+   * <p>
+   * 三件事缺一不可：
+   * 1. 清空界面气泡；
+   * 2. 丢掉 sessionId（下一轮后端会新建会话）——
+   *    **只清界面不换 sessionId 的话，后端还记得上文，"新对话"名不副实**；
+   * 3. 通知后端清掉旧会话的 Redis 热层（尽力而为，失败不影响用户）。
+   *    长期历史（t_ai_chat_history）刻意保留：换会话是"断开上下文"，
+   *    不等于"删掉聊天记录"。
+   */
   const handleClear = (): void => {
     modal.confirm({
-      title: '确认清空当前对话？',
-      content: '对话记录只存在于当前页面，清空后无法恢复。',
-      okText: '清空',
+      title: '开启新对话？',
+      content: '当前对话的上下文会被断开（历史记录仍会保留在服务端）。',
+      okText: '新对话',
       cancelText: '取消',
-      okButtonProps: { danger: true },
       onOk: () => {
+        const previous = sessionId
         setMessages([])
-        message.success('对话已清空')
+        setSessionId(undefined)
+        window.sessionStorage.removeItem(SESSION_KEY)
+        if (previous) {
+          // 不 await：清理失败也不该拦住用户开始新对话
+          void aiApi.newChatSession(previous).catch(() => undefined)
+        }
+        message.success('已开启新对话')
       },
     })
   }
@@ -122,7 +156,7 @@ export default function ChatTab() {
             disabled={sending}
           />
           <Button icon={<ClearOutlined />} onClick={handleClear} disabled={messages.length === 0}>
-            清空对话
+            新对话
           </Button>
         </Space>
       }

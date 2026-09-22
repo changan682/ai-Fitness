@@ -65,6 +65,15 @@ public final class CacheKeys {
     /** AI动作推荐缓存 — String（JSON），第4周启用 */
     public static final String AI_RECOMMEND = PREFIX + "ai:recommend:";
 
+    /**
+     * AI 问答会话热层 — String（JSON 数组，元素为 {@code {role, content}}）
+     * <p>
+     * 只存"送模型的上下文窗口"（最近 6 轮），长期历史落在 {@code t_ai_chat_history} 表里。
+     * key 必须带 userId：会话归属靠它把关 —— 只按 sessionId 存取的话，
+     * 猜到/拿到别人 sessionId 的人就能续上别人的对话。
+     */
+    public static final String AI_CHAT_SESSION = PREFIX + "ai:chat:session:";
+
     // ==================== 分布式锁 Key 前缀（规范 3.1 / 3.2） ====================
 
     /** 定时任务防重锁 */
@@ -116,6 +125,15 @@ public final class CacheKeys {
 
     /** 训练计划模板 TTL = 24 小时（规范 2.7） */
     public static final long WORKOUT_TEMPLATE_TTL_SECONDS = 86400;
+
+    /**
+     * AI 问答会话热层 TTL = 2 小时
+     * <p>
+     * 取值理由：一场连续提问不会超过两小时，而 key 留在 Redis 里越久越占内存；
+     * 过期并不等于"对话丢了"—— 热层未命中会从 {@code t_ai_chat_history} 回填最近 6 轮
+     * （见 {@code AiChatSessionService#load}）。
+     */
+    public static final long AI_CHAT_SESSION_TTL_SECONDS = 7200;
 
     // ==================== Key 构建方法（避免业务代码拼接裸 Key） ====================
 
@@ -174,6 +192,11 @@ public final class CacheKeys {
     /** 本周统计回源锁：lock:stats:weekly:{userId}:{weekStart} */
     public static String lockStatsWeekly(Long userId, LocalDate weekStart) {
         return LOCK_STATS_WEEKLY + userId + ":" + weekStart;
+    }
+
+    /** AI 问答会话热层：ai:chat:session:{userId}:{sessionId} */
+    public static String aiChatSession(Long userId, String sessionId) {
+        return AI_CHAT_SESSION + userId + ":" + sessionId;
     }
 
     private CacheKeys() {
