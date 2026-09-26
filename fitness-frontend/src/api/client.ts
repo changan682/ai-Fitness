@@ -222,6 +222,28 @@ client.interceptors.response.use(
       case ErrorCode.TOKEN_INVALID:
         handleUnauthorized('登录已过期，请重新登录')
         break
+      case ErrorCode.USER_NOT_FOUND:
+        /*
+         * 1003 有两种完全不同的来路，必须分开处理：
+         *
+         * ① 登录页拿一个不存在的手机号登录 —— 这是正常的表单错误，
+         *    已经在 SILENT_CODES 里（登录页自己会提示"该账号不存在，去注册"）；
+         * ② **带着 Token 请求，但那个用户已经不在库里** —— 例如账号被删除、
+         *    或数据库被清理过。此时 Token 本身仍然合法（签名对、没过期、不在黑名单），
+         *    于是不会走 9001，接口却永远返回 1003。
+         *
+         * 旧实现把 ② 也当成静默错误：页面既不提示也不跳登录，只是反复失败
+         * （实测现象是档案页一直空着、控制台里同一条 1003 刷 4 次）。
+         * 这里按"会话已失效"处理：清本地登录态 + 跳登录页并说明原因。
+         */
+        if (currentToken()) {
+          handleUnauthorized('登录状态已失效（账号不存在或已被删除），请重新登录')
+          break
+        }        // 没有 Token 说明是登录/注册这类公开接口 → 维持原来的静默语义
+        if (!SILENT_CODES.has(code)) {
+          notify.error(msg)
+        }
+        break
       case ErrorCode.SIGNATURE_INVALID:
         // 内部接口（Python → Java 回调）才会出现，前端遇到说明链路配置有问题，需要留痕
         notify.error('请求校验失败')

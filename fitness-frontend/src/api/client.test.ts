@@ -127,6 +127,36 @@ describe('业务错误码分流', () => {
     expect(shown).toHaveLength(0)
   })
 
+  it('1003（未登录时）：静默 —— 登录页自己会提示「该账号不存在，去注册」', async () => {
+    stubResponse({ code: ErrorCode.USER_NOT_FOUND, msg: '用户不存在', data: null })
+
+    await expect(http.get('/v1/a')).rejects.toMatchObject({ code: ErrorCode.USER_NOT_FOUND })
+    expect(shown).toHaveLength(0)
+    expect(unauthorizedCalls).toHaveLength(0)
+  })
+
+  it('1003（带着 Token 时）：按会话失效处理 —— 清登录态并跳登录，而不是无限重试', async () => {
+    // 真实场景：Token 本身合法（签名对、没过期、不在黑名单），但那个用户已经被删除
+    // （实测踩过：数据库清理把账号删了，档案页就一直空着，同一条 1003 刷了 4 次）。
+    // 这类"僵尸会话"必须让用户重新登录，否则页面永远好不了。
+    registerAuthBridge({
+      getToken: () => 'still-valid-looking-token',
+      onTokenRefreshed: () => {},
+      onUnauthorized: (msg) => unauthorizedCalls.push(msg),
+    })
+    stubResponse({ code: ErrorCode.USER_NOT_FOUND, msg: '用户不存在', data: null })
+
+    // 「跳登录」有 2 秒去抖（防止并发请求把路由反复覆盖），而上一个用例刚触发过它，
+    // 因此这里要把时间推快 —— 否则断言会因为去抖而永远为空，看起来像功能没生效。
+    const now = Date.now()
+    vi.spyOn(Date, 'now').mockReturnValue(now + 10_000)
+
+    await expect(http.get('/v1/user/profile')).rejects.toMatchObject({
+      code: ErrorCode.USER_NOT_FOUND,
+    })
+    expect(unauthorizedCalls).toEqual(['登录状态已失效（账号不存在或已被删除），请重新登录'])
+  })
+
   it('6001（AI 超时）：静默 —— 由页面展示兜底文案', async () => {
     stubResponse({ code: ErrorCode.AI_TIMEOUT, msg: 'AI服务超时', data: null })
 
