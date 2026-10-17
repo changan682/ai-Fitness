@@ -49,6 +49,7 @@ public class AiPythonClient {
     private static final String PATH_RECOMMEND = "/agent/v1/recommend";
     private static final String PATH_POSE = "/agent/v1/pose-evaluate";
     private static final String PATH_CHAT = "/agent/v1/chat";
+    private static final String PATH_AGENT = "/agent/v1/agent";
     private static final String PATH_BODY_CONSULT = "/agent/v1/body-consult";
     private static final String PATH_HEALTH = "/agent/v1/health";
     private static final String PATH_KNOWLEDGE_HEALTH = "/agent/v1/knowledge/health";
@@ -64,6 +65,26 @@ public class AiPythonClient {
 
     private final RestClient aiRestClient;
 
+    /**
+     * Agent 循环专用客户端（读取超时更长，默认 90s）。
+     * <p>
+     * 用字段注入 + {@code required=false} 而不是构造参数，有两个原因：
+     * <ol>
+     *   <li>不改变 {@code @RequiredArgsConstructor} 生成的单参构造 —— 现有测试
+     *       直接 {@code new AiPythonClient(restClient)} 时不会编译失败；</li>
+     *   <li>缺这个 Bean 时**自动降级**为普通客户端（{@link #agentClient()}），
+     *       最坏结果是 Agent 请求用 30s 超时，而不是启动失败。</li>
+     * </ol>
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    @org.springframework.beans.factory.annotation.Qualifier("aiAgentRestClient")
+    private RestClient aiAgentRestClient;
+
+    /** Agent 请求用哪个客户端：优先长超时的，没有就退回普通的 */
+    private RestClient agentClient() {
+        return aiAgentRestClient != null ? aiAgentRestClient : aiRestClient;
+    }
+
     /** 训练总结 — Python 侧生成 Markdown */
     public PySummaryData generateSummary(PySummaryRequest request) {
         PySummaryData data = post(PATH_SUMMARY, request,
@@ -71,6 +92,41 @@ public class AiPythonClient {
         // 验证标准（提示词第726行）：日志需能打印出「Java调Python成功」
         log.info("Java调Python成功: path={}, summaryLength={}",
                 PATH_SUMMARY, data.getSummary() == null ? 0 : data.getSummary().length());
+        return data;
+    }
+
+    /**
+     * Agent 循环问答（阶段二）—— 走**长超时**客户端。
+     * <p>
+     * 与 {@link #chat} 的区别：Python 侧可能进行多轮「模型 → 工具 → 模型」，
+     * 耗时可达数十秒，用普通 30s 客户端会先超时并报 6001（而实际只是没跑完）。
+     */
+    public PyChatData agentChat(PyChatRequest request) {
+        PythonEnvelope<PyChatData> envelope;
+        try {
+            envelope = agentClient().post()
+                    .uri(PATH_AGENT)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(request)
+                    .retrieve()
+                    .body(new ParameterizedTypeReference<PythonEnvelope<PyChatData>>() {});
+        } catch (ResourceAccessException e) {
+            // 走到这里通常意味着 Python 侧循环超过了超时时间或服务不可达
+            log.warn("调用Python失败(Agent 连接/超时): path={}, reason={}", PATH_AGENT, e.getMessage());
+            throw new BusinessException(ErrorCode.AI_TIMEOUT);
+        } catch (RestClientResponseException e) {
+            log.warn("调用Python返回错误(Agent): path={}, status={}, body={}",
+                    PATH_AGENT, e.getStatusCode(), abbreviate(e.getResponseBodyAsString()));
+            if (e.getStatusCode().is4xxClientError()) {
+                throw new BusinessException(ErrorCode.PARAM_INVALID, extractPythonMessage(e));
+            }
+            throw new BusinessException(ErrorCode.AI_RESPONSE_ERROR);
+        }
+        PyChatData data = unwrap(envelope, PATH_AGENT);
+        log.info("Java调Python成功(Agent): path={}, sources={}, steps={}",
+                PATH_AGENT,
+                data.getSources() == null ? 0 : data.getSources().size(),
+                data.getSteps() == null ? 0 : data.getSteps().size());
         return data;
     }
 

@@ -152,6 +152,25 @@ class ChatResponse(BaseModel):
     #: 降级原因（给人看的中文说明），未降级时为 None
     degradation_reason: Optional[str] = None
 
+    #: Agent 模式下的工具调用记录（阶段一：最多一条）。
+    #: 这是「这轮到底有没有用知识库」的**客观证据** —— 调没调工具、传了什么参数、
+    #: 有没有命中、最高相似度多少，全部可查，不再依赖模型自报 ``[[KB:USED]]`` 标记。
+    #: **常规模式（非 Agent）为 None**，避免老调用方把空数组误解成"查了但没命中"。
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    #: 是否真的拿到了知识依据（工具执行成功且命中非空）。
+    #: ``None`` 表示不是 Agent 模式、无从判断；``False`` 明确表示"这轮没用上知识库"。
+    knowledge_used: Optional[bool] = None
+
+    #: Agent 循环的步骤记录（阶段二）：每步含
+    #: ``step / tool / arguments / ok / summary / elapsed_ms / error``。
+    #: 前端据此渲染「AI 用了哪些数据」的折叠面板 —— 让结论**可被用户自己验证**，
+    #: 而不是只能相信一个数字。非 Agent 循环路径为 None。
+    steps: Optional[List[Dict[str, Any]]] = None
+    #: Agent 循环元信息：``steps_used / tokens / latency_ms / stopped_by / max_steps``。
+    #: ``stopped_by`` 取值 completed / max_steps / deadline / budget / error，
+    #: 说明这一轮为什么停下（前端与审计都依赖它）。
+    agent: Optional[Dict[str, Any]] = None
+
 
 # --- 身体状态主动问询（体验优化批次 D） ---
 class BodyConsultRequest(BaseModel):

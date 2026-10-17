@@ -41,6 +41,9 @@ public class WebConfig implements WebMvcConfigurer {
             // 头像**读取**免鉴权：<img> 不带 Token；只返回图片字节、不含隐私字段
             "/api/v1/user/avatar/*",
             "/api/ai/callback/**",       // Python 回调走 HMAC 验签，第7周实现
+            // Agent 工具网关：调用方是内网 Python，无用户 Token，身份凭证是 HMAC 签名
+            // （与回调同一套算法）。userId 在**签名保护的 body** 里，不在请求头。
+            "/api/ai/tool/**",
             "/api/v1/health"             // 健康检查供 Docker/K8s 探针调用，无需鉴权
     };
 

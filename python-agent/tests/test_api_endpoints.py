@@ -135,6 +135,14 @@ DATA_KEYS = {
         "data_source",
         "degraded",
         "degradation_reason",
+        # Agent 模式证据（阶段一）—— 缺了它们，"这轮有没有用知识库"只能听模型自报
+        # 已在 Java 侧 PyChatData / AiChatResponse 显式声明并透传（加性字段）
+        "tool_calls",
+        "knowledge_used",
+        # Agent 循环记录（阶段二）—— 缺了它们，前端无法展示"AI 用了哪些数据"，
+        # 用户只能相信一个数字而无法自己验证；同样已在 Java 侧声明并透传
+        "steps",
+        "agent",
     },
     "get_knowledge_health": {
         "milvus_connected",

@@ -8,6 +8,7 @@ import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
 
 import java.net.http.HttpClient;
+import java.time.Duration;
 
 /**
  * RestClient 配置 — Java → Python 的跨语言 HTTP 客户端（规范第 922 行「RestClientConfig」）
@@ -29,6 +30,22 @@ public class RestClientConfig {
     /** Python 服务调用专用的 RestClient（带 baseUrl，业务层只写相对路径） */
     @Bean
     public RestClient aiRestClient(AiProperties aiProperties) {
+        return buildRestClient(aiProperties, aiProperties.getPython().getReadTimeout());
+    }
+
+    /**
+     * Agent 循环专用 RestClient —— 读取超时更长（默认 90s）。
+     * <p>
+     * 为什么不复用 {@link #aiRestClient}：一次 Agent 回答含多轮模型 + 工具往返，
+     * 用普通的 30s 会先超时，用户看到「AI 服务超时」而其实只是"还在跑"。
+     * 拆成两个 Bean 比放宽全局超时更安全 —— 普通接口仍保持快速失败。
+     */
+    @Bean
+    public RestClient aiAgentRestClient(AiProperties aiProperties) {
+        return buildRestClient(aiProperties, aiProperties.getPython().getAgentReadTimeout());
+    }
+
+    private RestClient buildRestClient(AiProperties aiProperties, Duration readTimeout) {
         AiProperties.Python python = aiProperties.getPython();
 
         HttpClient httpClient = HttpClient.newBuilder()
@@ -37,13 +54,13 @@ public class RestClientConfig {
                 .build();
 
         JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
-        requestFactory.setReadTimeout(python.getReadTimeout());
+        requestFactory.setReadTimeout(readTimeout);
 
         return RestClient.builder()
                 .baseUrl(python.getBaseUrl())
                 .requestFactory(requestFactory)
                 .requestInterceptor((request, body, execution) -> {
-                    // 无 traceId 时生成一个并写入 MDC，保证 Go/Java/Python 三段日志能串起来
+                    // 无 traceId 时生成一个并写入 MDC，保证 Java/Python 两段日志能串起来
                     request.getHeaders().set(TraceIdUtil.TRACE_ID_HEADER, TraceIdUtil.currentOrCreate());
                     return execution.execute(request, body);
                 })

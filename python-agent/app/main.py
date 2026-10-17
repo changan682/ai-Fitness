@@ -157,6 +157,17 @@ async def lifespan(app: FastAPI):
         logger.warning(
             "故障注入接口已开启：GET /agent/v1/_debug/fault?mode=500|slow|400（仅用于联调验证降级链路）"
         )
+    if settings.agent_mode_enabled:
+        logger.warning(
+            "AGENT_MODE_ENABLED=true：/agent/v1/chat 走「工具调用」路径（阶段一：单轮）。"
+            "模型自行决定是否调用 search_knowledge，「有没有用知识库」由工具调用记录判定；"
+            "该路径自身异常会自动退回固定编排。置为 false 即可回滚。"
+        )
+    else:
+        logger.info(
+            "AGENT_MODE_ENABLED=false：/agent/v1/chat 走固定编排（四层降级）；"
+            "置为 true 可启用工具调用路径。"
+        )
     logger.info("=" * 72)
 
     # --- 知识库初始化（规范第 3544 行：启动时自动完成，确保 RAG 启动即可用）---
@@ -296,6 +307,49 @@ def chat(request: ChatRequest) -> AgentResponse:
         history=[turn.model_dump() for turn in (request.history or [])],
     )
     logger.info("知识库问答响应: sources=%d", len(result.sources))
+    return _ok(result.model_dump(mode="json"))
+
+
+@router.post("/agent", response_model=AgentResponse,
+             summary="Agent 循环问答（阶段二：多步工具调用）")
+def agent_chat(request: ChatRequest) -> AgentResponse:
+    """Agent 循环问答 —— 模型自主决定调用哪些工具、调几次、何时作答。
+
+    与 ``/chat`` 的区别（两者**并存**，不是替换）：
+
+    - ``/chat``：固定编排（四层降级），单轮，快，30s 超时；
+    - ``/agent``：多轮「模型 → 工具 → 模型」，能查用户真实训练/体测数据，
+      耗时可达数十秒（Java 侧走独立的长超时客户端）。
+
+    工具分两类：``search_knowledge`` 在**本进程内**执行（知识库引擎就在 Python），
+    ``get_weekly_stats`` / ``get_training_records`` / ``get_body_trend``
+    经 **Java 工具网关**（HMAC 签名）取数 —— 业务口径仍只写在 Java 一处。
+
+    响应只**新增** ``steps`` / ``agent`` 两个字段，其余与 ``/chat`` 完全一致，
+    因此前端可共用同一套类型；出问题时改回 ``/chat`` 即可，无需回滚代码。
+    """
+    logger.info(
+        "收到 Agent 问答请求: userId=%s category=%s questionLength=%d 历史=%d 条",
+        request.user_id,
+        request.category,
+        len(request.question or ""),
+        len(request.history or []),
+    )
+    result = agent.chat_with_agent_loop(
+        question=request.question,
+        category=request.category,
+        user_id=request.user_id,
+        history=[turn.model_dump() for turn in (request.history or [])],
+    )
+    meta = result.agent or {}
+    logger.info(
+        "Agent 问答响应: data_source=%s 步数=%s 停止原因=%s 耗时=%sms sources=%d",
+        result.data_source,
+        meta.get("steps_used"),
+        meta.get("stopped_by"),
+        meta.get("latency_ms"),
+        len(result.sources),
+    )
     return _ok(result.model_dump(mode="json"))
 
 

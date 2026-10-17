@@ -28,6 +28,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
 
@@ -62,6 +63,13 @@ public class AiProxyService {
     private final AiPythonClient aiPythonClient;
     private final AiProperties aiProperties;
     private final AiChatSessionService chatSessionService;
+
+    /**
+     * Agent 运行审计（阶段二）—— 字段注入而非构造参数：
+     * 保持 {@code @RequiredArgsConstructor} 的三参构造不变，现有测试无需改动。
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private AgentRunAuditService agentRunAuditService;
 
     /** 7.2 动作智能推荐 */
     public AiRecommendResponse recommend(AiRecommendRequest req) {
@@ -232,6 +240,10 @@ public class AiProxyService {
                     .dataSource(data.getDataSource())
                     .degraded(data.getDegraded())
                     .degradationReason(data.getDegradationReason())
+                    // Agent 模式的工具调用证据：同样原样透传，不得吞掉 ——
+                    // 它是「这轮到底有没有用知识库」的客观依据（非 Agent 模式为 null）
+                    .toolCalls(data.getToolCalls())
+                    .knowledgeUsed(data.getKnowledgeUsed())
                     .generatedAt(AiTimeUtil.parseIsoOrNow(data.getGeneratedAt()))
                     .build();
         });
@@ -245,6 +257,164 @@ public class AiProxyService {
     /** 「新对话」：只清 Redis 热层，长期历史保留（供后续"历史会话"能力使用） */
     public void resetChatSession(Long userId, String sessionId) {
         chatSessionService.clearHot(userId, chatSessionService.normalizeSessionId(sessionId));
+    }
+
+    /**
+     * Agent 循环问答（阶段二）—— 与 {@link #chat} 并列的入口。
+     *
+     * <h3>为什么单独一个方法而不是给 chat 加开关</h3>
+     * 两者失败语义与耗时量级都不同：<ol>
+     *   <li>{@code /ai/chat} 走 30s 超时客户端，{@code /ai/agent} 走 90s 的
+     *       （Agent 含多轮模型 + 工具往返，用 30s 会先超时）；</li>
+     *   <li>Agent 需要落审计（{@link AgentRunAuditService}），chat 不需要；</li>
+     *   <li>保留 {@code /ai/chat} 的**原样行为**是回滚保障 —— 新路径出问题，
+     *       前端改一个路径就能退回去，不需要回滚代码。</li>
+     * </ol>
+     *
+     * <h3>记入对话记忆</h3>
+     * 与 chat 一致：无论真实链路还是兜底文案都把这一轮追加进记忆，
+     * 否则用户"看到回答却下一句就失忆"。Agent 的多轮上下文同样依赖它。
+     */
+    public AiChatResponse agentChat(Long userId, AiChatRequest req) {
+        String sessionId = chatSessionService.normalizeSessionId(req.getSessionId());
+        if (sessionId == null) {
+            sessionId = chatSessionService.newSessionId();
+        }
+        String resolvedSessionId = sessionId;
+        List<AiChatSessionService.ChatTurn> history = chatSessionService.load(userId, resolvedSessionId);
+
+        long started = System.currentTimeMillis();
+        AiChatResponse response;
+        try {
+            response = withFallback(aiProperties.getFallback().getChat(), () -> {
+                PyChatRequest py = new PyChatRequest();
+                py.setQuestion(req.getQuestion());
+                py.setCategory(req.getCategory());
+                py.setUserId(userId);
+                if (!history.isEmpty()) {
+                    py.setHistory(history.stream().map(turn -> {
+                        PyChatRequest.Turn item = new PyChatRequest.Turn();
+                        item.setRole(turn.getRole());
+                        item.setContent(turn.getContent());
+                        return item;
+                    }).toList());
+                }
+
+                PyChatData data = aiPythonClient.agentChat(py);
+                return toAgentResponse(req.getQuestion(), data);
+            });
+        } catch (BusinessException e) {
+            // 失败也要留审计：只记成功的审计是有偏的，出问题时最需要的是失败那一轮
+            if (agentRunAuditService != null) {
+                agentRunAuditService.recordFailure(userId, resolvedSessionId, req.getQuestion(),
+                        System.currentTimeMillis() - started, e.getCode(), e.getMessage());
+            }
+            throw e;
+        }
+
+        long latencyMs = System.currentTimeMillis() - started;
+        chatSessionService.appendTurn(userId, resolvedSessionId, req.getQuestion(),
+                response.getAnswer(), response.getDataSource(),
+                Boolean.TRUE.equals(response.getDegraded()));
+        if (agentRunAuditService != null) {
+            agentRunAuditService.record(userId, resolvedSessionId, req.getQuestion(), response, latencyMs);
+        }
+        return response.toBuilder().sessionId(resolvedSessionId).build();
+    }
+
+    /**
+     * Agent 专用键名映射：Python 的 snake_case → 前端约定的 camelCase。
+     * <p>
+     * <b>为什么需要这一步</b>：{@code steps} / {@code agent} / {@code tool_calls} 在两侧都是
+     * <b>未类型化的 Map/List</b>，因此 Jackson 的 {@code @JsonProperty} 帮不上忙 ——
+     * 它们会原样透传，前端拿到的是 {@code elapsed_ms} 而不是 {@code elapsedMs}。
+     * <p>
+     * 这不是理论问题：阶段二验收时前端读 {@code stoppedBy} 拿到 {@code undefined}，
+     * 界面上"停止原因"整块空白，而链路本身是通的 —— 这类缺陷最难查，
+     * 因为没有任何一处报错。{@code AiProtocolContractTest} 用断言把它钉住。
+     * <p>
+     * 之所以在这里翻译而不是让 Python 直接吐 camelCase：Python 侧「字段一律 snake_case」
+     * 是它与 Java 的通用约定，为两个字段破例会让后面的人分不清该跟哪套。
+     */
+    private static final Map<String, String> STEP_KEY_MAP = Map.of(
+            "elapsed_ms", "elapsedMs"
+    );
+
+    private static final Map<String, String> AGENT_KEY_MAP = Map.of(
+            "steps_used", "stepsUsed",
+            "latency_ms", "latencyMs",
+            "stopped_by", "stoppedBy",
+            "max_steps", "maxSteps"
+    );
+
+    private static final Map<String, String> TOOL_CALL_KEY_MAP = Map.of(
+            "knowledge_used", "knowledgeUsed",
+            "best_score", "bestScore"
+    );
+
+    /** 按映射表重命名一层 Map 的键；未登记的键原样保留（未来加字段不会被吞掉） */
+    private static Map<String, Object> renameKeys(Map<String, Object> source,
+                                                  Map<String, String> mapping) {
+        if (source == null) {
+            return null;
+        }
+        Map<String, Object> result = new java.util.LinkedHashMap<>();
+        source.forEach((key, value) -> result.put(mapping.getOrDefault(key, key), value));
+        return result;
+    }
+
+    /** 对列表里的每个 Map 做键名映射 */
+    private static List<Map<String, Object>> renameKeys(List<Map<String, Object>> source,
+                                                        Map<String, String> mapping) {
+        if (source == null) {
+            return null;
+        }
+        List<Map<String, Object>> result = new ArrayList<>(source.size());
+        for (Map<String, Object> item : source) {
+            result.add(item == null ? null : renameKeys(item, mapping));
+        }
+        return result;
+    }
+
+    /** 把 Python 的 Agent 响应映射成前端契约（含 steps / agent —— 让「AI 用了什么数据」可验证） */
+    private AiChatResponse toAgentResponse(String question, PyChatData data) {
+        List<AiChatResponse.Source> sources = new ArrayList<>();
+        if (data.getSources() != null) {
+            for (PyChatData.Source s : data.getSources()) {
+                sources.add(AiChatResponse.Source.builder()
+                        .category(s.getCategory())
+                        .title(s.getTitle())
+                        .content(s.getContent())
+                        .score(s.getScore())
+                        .scoreType(s.getScoreType())
+                        .build());
+            }
+        }
+
+        List<Map<String, Object>> steps = renameKeys(data.getSteps(), STEP_KEY_MAP);
+        List<Map<String, Object>> toolCalls = renameKeys(data.getToolCalls(), TOOL_CALL_KEY_MAP);
+
+        Boolean knowledgeUsed = data.getKnowledgeUsed();
+        if (knowledgeUsed == null && steps != null) {
+            // Python 侧没给标记时自行推断：有一步成功且用的是知识库工具，就算用上了
+            knowledgeUsed = steps.stream().anyMatch(step -> step != null
+                    && Boolean.TRUE.equals(step.get("ok"))
+                    && Boolean.TRUE.equals(step.get("knowledgeUsed")));
+        }
+
+        return AiChatResponse.builder()
+                .question(data.getQuestion() != null ? data.getQuestion() : question)
+                .answer(data.getAnswer())
+                .sources(sources)
+                .dataSource(data.getDataSource())
+                .degraded(data.getDegraded())
+                .degradationReason(data.getDegradationReason())
+                .toolCalls(toolCalls)
+                .knowledgeUsed(knowledgeUsed)
+                .steps(steps)
+                .agent(renameKeys(data.getAgent(), AGENT_KEY_MAP))
+                .generatedAt(AiTimeUtil.parseIsoOrNow(data.getGeneratedAt()))
+                .build();
     }
 
     /**

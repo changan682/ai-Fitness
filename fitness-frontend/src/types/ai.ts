@@ -144,7 +144,7 @@ export interface ChatResponse {
    * - `none`：压根没检索到来源（检索失败/无命中），回答同样来自通用知识
    * - `builtin`：内置 18 条兜底（此时 `sources[].scoreType` 必为 `heuristic`）
    */
-  dataSource: 'milvus' | 'llm_only' | 'none' | 'builtin' | string
+  dataSource: 'milvus' | 'llm_only' | 'none' | 'builtin' | 'agent' | string
   /** 是否走了降级路径（知识库没覆盖、检索失败/无命中、无 LLM Key 本地拼装、内置兜底） */
   degraded: boolean
   /** 降级原因（中文说明），未降级时为 null */
@@ -157,6 +157,64 @@ export interface ChatResponse {
   sessionId: string
   /** yyyy-MM-dd HH:mm:ss */
   generatedAt: string
+
+  /**
+   * Agent 模式下的工具调用记录 —— 「这轮到底有没有用知识库」的**客观证据**
+   * <p>
+   * 只有 Agent 路径才返回；常规 `/ai/chat` 为 `null`
+   * （`null` 与空数组语义不同：空数组 = 进了 Agent 路径但模型判断无需调工具）。
+   */
+  toolCalls?: ToolCallRecord[] | null
+  /** 是否真的拿到了知识依据（`null` = 非 Agent 模式，无从判断） */
+  knowledgeUsed?: boolean | null
+  /** Agent 循环的每一步（阶段二），用于渲染「AI 用了什么数据」面板 */
+  steps?: AgentStep[] | null
+  /** Agent 循环元信息 */
+  agent?: AgentMeta | null
+}
+
+/** 一次工具调用的记录（Agent 模式） */
+export interface ToolCallRecord {
+  name: string
+  arguments?: Record<string, unknown>
+  ok: boolean
+  knowledgeUsed?: boolean
+  /** 最高相似度（仅知识库检索有值） */
+  bestScore?: number
+  error?: string | null
+}
+
+/**
+ * Agent 的一步：模型决定调用某个工具 + 该工具的返回摘要
+ * <p>
+ * 前端把它渲染成「思考过程」，让用户能**自己验证**结论是从哪些数据推出来的 ——
+ * 这是本项目「降级/过程必须可见」原则在 Agent 时代的延伸：
+ * 只给一个数字、不给依据，用户只能选择相信。
+ */
+export interface AgentStep {
+  step: number
+  tool: string
+  arguments?: Record<string, unknown>
+  ok: boolean
+  /** 一句话结果摘要，例如「训练 4 天 / 容量 18650kg」 */
+  summary: string
+  elapsedMs?: number
+  error?: string | null
+}
+
+/** Agent 循环元信息 */
+export interface AgentMeta {
+  stepsUsed: number
+  tokens: number
+  latencyMs: number
+  /**
+   * 停止原因：
+   * - `completed` 正常完成
+   * - `max_steps` / `deadline` / `budget` 触发三重上限（回答基于已获取数据，可能不完整）
+   * - `error` 无法执行（未配 Key / MOCK_MODE）
+   */
+  stoppedBy: 'completed' | 'max_steps' | 'deadline' | 'budget' | 'error' | string
+  maxSteps: number
 }
 
 /** 前端本地的对话气泡（不持久化，离开页面即清空） */
@@ -171,12 +229,18 @@ export interface ChatMessage {
   pending?: boolean
   /** 出错时的提示文案（显示错误卡片） */
   errorText?: string
-  /** 来源库（milvus/llm_only/none/builtin）—— 用于标注「通用知识回答」与「内置条目」 */
+  /** 来源库（milvus/llm_only/none/builtin/agent）—— 用于标注「通用知识回答」与「内置条目」 */
   dataSource?: string
   /** 是否为降级回答 */
   degraded?: boolean
   /** 降级原因 —— 直接展示给用户，说明这份回答打了什么折扣 */
   degradationReason?: string | null
+  /** Agent 的每一步（阶段二）：渲染「AI 用了什么数据」面板 */
+  steps?: AgentStep[] | null
+  /** Agent 循环元信息（步数/耗时/停止原因） */
+  agent?: AgentMeta | null
+  /** 是否真的用上了知识库（Agent 模式） */
+  knowledgeUsed?: boolean | null
 }
 
 // ==================== 7.7 身体状态主动问询 ====================

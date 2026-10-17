@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import json
 import logging
 import re
 import time
@@ -190,6 +191,46 @@ LOW_RELEVANCE_CONTEXT_WARNING = (
     "（注意：以下资料与问题的相关度较低，可能完全不相关。请先判断它能否回答问题，"
     "不能回答就按规则 2 标记 [[KB:MISS]]）"
 )
+
+#: Agent 模式（阶段一：单轮工具调用）的系统提示。
+#:
+#: 与 :data:`RAG_SYSTEM_PROMPT` 的根本区别：**不再强制检索**。
+#: 常规模式必须"先检索再说"，所以需要 ``[[KB:USED]]`` / ``[[KB:MISS]]`` 这样的自报标记
+#: 来补救"检索出来的资料其实无关"这个问题；Agent 模式下**检索本身是一个可选动作**，
+#: 有没有用知识库变成了**客观事实**（工具调没调、调了有没有命中），不再依赖模型自觉。
+#:
+#: 三条必须写进去的约束（少一条就会退化成幻觉）：
+#: 1. 不该检索就别检索（否则又回到"所有问题都往知识库里塞"）；
+#: 2. 检索不到就如实说，不许编造依据与来源；
+#: 3. **明确告诉它现在拿不到用户个人数据** —— 阶段一只接了知识库工具，
+#:    不写清楚的话，被问到"我上周练得怎么样"时它会编数据。
+AGENT_SYSTEM_PROMPT = """你是一位专业、诚实的健身顾问，可以通过工具检索内置知识库。
+
+## 你当前的能力边界（必须严格遵守）
+1. 你可以调用 `search_knowledge` 检索知识库（200 条通用健身知识）。
+2. **你无法访问该用户的个人训练记录、体重体测数据、饮食记录**（本轮没有这些工具）。
+   如果用户问"我练得怎么样 / 我体重变化 / 我该吃多少卡"这类**需要他本人数据**的问题，
+   必须明确说明"我看不到你的训练与体测数据，请到对应页面查看"，
+   **绝对不要编造任何具体数字**（重量、容量、天数、热量），也不要假装查过。
+3. 不要声称自己查过知识库 —— 只有真的调用了 `search_knowledge` 才算。
+
+## 什么时候调用 search_knowledge
+- 该调：动作要领、训练原理、营养与恢复知识、补剂用法这类**需要通用知识依据**的问题。
+- 不该调：寒暄、追问上文（例如"那做几组"）、以及需要用户个人数据的问题。
+- **不要为了显得严谨而检索**：与本轮问题无关的知识检索只会浪费并引入噪声。
+
+## 检索结果怎么用
+- 工具返回 `note` 说明"资料相关度偏低"或"未检索到"时：
+  **不要强行引用**，改为基于通用健身知识回答，并在正文开头说明
+  "知识库中没有相关资料，以下基于通用健身知识"。
+- 引用资料时标注来源，格式：> 📚 参考：《来源名称》
+- 涉及到个人健康、伤病问题时，必须加上"建议咨询专业医生或教练"。
+
+## 输出格式（Markdown）
+- 简短结论 → 分点解释 → 总结建议
+- 使用 ## 标题、**加粗**、分点列表；字数 150-400 字
+- **不要再输出 [[KB:USED]] / [[KB:MISS]] 这类标记**：Agent 模式用工具调用记录来判断，
+  标记会污染正文。"""
 
 # 第 7 周 RabbitMQ 消费者使用（本周只落地模板）
 WEEKLY_PLAN_SYSTEM_PROMPT = """你是一位负责学员长期训练规划的资深教练。
@@ -1934,6 +1975,15 @@ def chat_with_rag(
 
     turns = _sanitize_history(history)
 
+    # --- Agent 模式（阶段一：单轮工具调用）。默认关闭，见 config.agent_mode_enabled ---
+    if _agent_mode_enabled():
+        try:
+            return _chat_with_agent_tools(text, category, user_id, turns)
+        except Exception as exc:  # noqa: BLE001 - Agent 是增强而非替代，失败必须退回已验证路径
+            logger.warning(
+                "Agent 模式不可用，退回固定编排 RAG: %s: %s", type(exc).__name__, exc
+            )
+
     # --- 第 1、2 层：真实链路 ---
     try:
         return _chat_with_real_rag(text, category, user_id, turns)
@@ -1944,6 +1994,528 @@ def chat_with_rag(
 
     # --- 第 3 层：离线兜底 ---
     return _chat_with_mock_knowledge(text, category, user_id)
+
+
+def _agent_mode_enabled() -> bool:
+    """Agent 模式开关（环境变量 ``AGENT_MODE_ENABLED``，默认关闭）。
+
+    独立成函数而不是直接读 ``settings``：便于测试用 monkeypatch 精确控制，
+    也保证开关异常时**默认关闭**（退回已验证的固定编排）。
+    """
+    try:
+        return bool(settings.agent_mode_enabled)
+    except Exception:  # noqa: BLE001 - 配置异常不应影响问答
+        return False
+
+
+def _chat_with_agent_tools(
+    question: str,
+    category: Optional[str],
+    user_id: Optional[int],
+    history: List[dict],
+) -> ChatResponse:
+    """Agent 模式第一版：**单轮**工具调用。
+
+    <h3>与常规 RAG 的差别</h3>
+    常规 RAG 是「先检索、再让模型判断资料有没有用」，所以需要 ``[[KB:USED]]`` /
+    ``[[KB:MISS]]`` 这套自报标记来补救"检索到无关资料"的问题。
+    这里把**检索变成模型可选的动作**：调不调、调什么参数都由模型决定，
+    于是"这轮到底有没有用知识库"变成**可观测的事实**（:attr:`agent_tools.ToolOutcome`），
+    不再依赖模型自觉。
+
+    <h3>为什么是"单轮"</h3>
+    一次模型调用 → 若发起工具调用则执行一次 → 再调一次模型收口。**不做循环**。
+    多步循环会带来步数/token/墙钟三重上限与审计表，那是阶段二的内容；
+    阶段一先验证"检索不再是强制路径"这一个假设，改动面最小、可随时用
+    ``AGENT_MODE_ENABLED=false`` 回滚。
+
+    <h3>降级与诚实标记（必须保持不变）</h3>
+    - 模型**没调**工具 → ``data_source=llm_only`` / ``sources=[]`` / ``knowledge_used=False``
+      （回答没走知识库，前端要能看出来；``degraded=True`` 让前端显示"未使用知识库"提示）
+    - 调了但**无命中** → ``data_source=none`` + 原因写明
+    - 调了且命中，但最高分低于地板 → 仍标 ``milvus``，但 ``degradation_reason``
+      注明"资料相关度偏低"，让用户知道依据不强
+    - 调了且命中 → ``data_source=milvus`` / ``degraded=False``
+    - 工具执行失败（Milvus/Embedding 挂了）→ ``data_source=none`` + 失败原因，
+      **绝不让模型在没有依据的情况下假装有依据**
+    """
+    from .agent_tools import AGENT_TOOL_SCHEMAS, ToolOutcome, execute_tool
+    from .llm import get_llm
+
+    llm = get_llm()
+    if not llm.configured:
+        # 没有 Key 时 Agent 模式无从谈起，交给上层退回固定编排（会走本地拼装/内置兜底）
+        raise RuntimeError("未配置 DEEPSEEK_API_KEY，Agent 模式不可用")
+    if settings.mock_mode:
+        raise RuntimeError("MOCK_MODE=true，Agent 模式不可用")
+
+    messages: List[dict] = [{"role": "system", "content": AGENT_SYSTEM_PROMPT}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": question})
+
+    reply = llm.chat_with_tools(
+        messages,
+        tools=AGENT_TOOL_SCHEMAS,
+        tool_choice="auto",
+        temperature=0.3,
+        max_tokens=1200,
+    )
+
+    # ---- 情况 A：模型判断不需要检索（这是本阶段最有价值的路径）----
+    if not reply.has_tool_calls:
+        logger.info("Agent 模式：模型未调用任何工具，按通用知识回答")
+        return ChatResponse(
+            question=question,
+            answer=reply.content,
+            sources=[],
+            generated_at=now_local(),
+            data_source="llm_only",
+            degraded=True,
+            degradation_reason=(
+                "模型判断该问题无需检索知识库（未调用 search_knowledge），"
+                "回答基于通用知识，未经知识库佐证"
+            ),
+            tool_calls=[],
+            knowledge_used=False,
+        )
+
+    # ---- 情况 B：执行工具（单轮，只执行第一个，避免一次回复里重复检索）----
+    call = reply.tool_calls[0]
+    if len(reply.tool_calls) > 1:
+        logger.info("Agent 模式：模型一次发起 %d 个工具调用，本轮只执行第一个(%s)",
+                    len(reply.tool_calls), call["name"])
+    outcome: ToolOutcome = execute_tool(
+        call["name"],
+        call.get("arguments"),
+        fallback_query=question,
+        category=category,
+    )
+
+    tool_trace = [{
+        "name": outcome.name,
+        "arguments": call.get("arguments") or {},
+        "ok": outcome.ok,
+        "knowledge_used": outcome.knowledge_used,
+        "best_score": round(outcome.best_score, 4),
+        "error": outcome.error,
+    }]
+
+    # 工具失败：不要假装查过了，明确告知模型与用户
+    if not outcome.ok:
+        logger.warning("Agent 模式：工具 %s 执行失败: %s", outcome.name, outcome.error)
+        return ChatResponse(
+            question=question,
+            answer=(
+                f"> ⚠️ 知识库检索不可用（{outcome.error}）。"
+                "以下内容未使用知识库，请谨慎参考。\n\n"
+                f"{reply.content}".strip()
+                if reply.content
+                else "知识库检索不可用，暂时无法回答该问题，请稍后再试。"
+            ),
+            sources=[],
+            generated_at=now_local(),
+            data_source="none",
+            degraded=True,
+            degradation_reason=f"工具 {outcome.name} 执行失败：{outcome.error}",
+            tool_calls=tool_trace,
+            knowledge_used=False,
+        )
+
+    # 把工具结果回填给模型（OpenAI 兼容协议：assistant(tool_calls) → tool(tool_call_id)）
+    messages.append({
+        "role": "assistant",
+        "content": reply.content or None,
+        "tool_calls": [{
+            "id": call["id"],
+            "type": "function",
+            "function": {
+                "name": call["name"],
+                "arguments": call.get("raw_arguments")
+                if isinstance(call.get("raw_arguments"), str)
+                else json.dumps(call.get("arguments") or {}, ensure_ascii=False),
+            },
+        }],
+    })
+    messages.append({
+        "role": "tool",
+        "tool_call_id": call["id"],
+        "content": outcome.content,
+    })
+
+    final_text = llm.chat(messages, temperature=0.3, max_tokens=1200)
+    # 模型偶尔会照抄提示词里的标记格式，这里剥掉以免污染正文
+    _, final_text = _split_kb_marker(final_text)
+
+    if not outcome.knowledge_used:
+        # 检索成功但零命中：本身是"知识库没覆盖"的诚实结论
+        return ChatResponse(
+            question=question,
+            answer=final_text,
+            sources=[],
+            generated_at=now_local(),
+            data_source="none",
+            degraded=True,
+            degradation_reason="知识库中未检索到与该问题相关的资料，回答基于通用知识",
+            tool_calls=tool_trace,
+            knowledge_used=False,
+        )
+
+    reason = None
+    if outcome.below_floor:
+        reason = (
+            f"知识库命中的资料相关度偏低（最高相似度 {outcome.best_score:.4f}，"
+            f"低于地板分 {_rag_context_floor():.2f}），回答的依据可能不强"
+        )
+
+    return ChatResponse(
+        question=question,
+        answer=final_text,
+        sources=[
+            ChatSource(
+                category=item["category"],
+                title=item["title"],
+                content=item["content"],
+                score=item["score"],
+                score_type="cosine",
+            )
+            for item in outcome.sources
+        ],
+        generated_at=now_local(),
+        data_source="milvus",
+        degraded=bool(outcome.below_floor),
+        degradation_reason=reason,
+        tool_calls=tool_trace,
+        knowledge_used=True,
+    )
+
+
+def _rag_context_floor() -> float:
+    """取地板分（仅用于生成提示文案；取不到时回退 0.55）。"""
+    try:
+        from .rag import RAG_CONTEXT_FLOOR
+
+        return float(RAG_CONTEXT_FLOOR)
+    except Exception:  # noqa: BLE001
+        return 0.55
+
+
+# ============================================================
+# Agent 循环（阶段二）：多步工具调用
+# ============================================================
+
+#: Agent 循环的系统提示。
+#:
+#: 与阶段一 :data:`AGENT_SYSTEM_PROMPT` 的关键差别：**现在真的能看到用户数据了**。
+#: 因此约束要反过来写 —— 阶段一要求"查不到就说查不到"，这里要求
+#: "**能查就必须查，不许估算**"。这恰恰是 Agent 化最实际的价值：
+#: 用户问"我上周练得怎么样"，以前只能得到一句"我看不到你的数据"，
+#: 现在应当拿到真实的天数/容量/趋势，且每个数字都能追溯到某次工具调用。
+AGENT_LOOP_SYSTEM_PROMPT = """你是一位专业、诚实、会动手查数据的健身教练。
+你可以调用工具获取**该用户自己的**训练记录、周统计、体测趋势，以及检索健身知识库。
+
+## 核心纪律
+1. **凡是能用工具查到的数字，必须查，绝不允许估算或编造。**
+   用户问"我上周练得怎么样""我体重变化""卧推多少kg"时，
+   必须调用对应工具拿到真实数据再回答。
+2. 每轮最多调用少量工具，拿到结果后判断信息够不够：
+   够了就直接回答；不够再调下一个。
+   **不要为了显得严谨而重复查同一件事。**
+3. 工具返回 `error` 时：不要假装查过了，明确告诉用户"这项数据暂时取不到"，
+   并说明可以到哪个页面查看；其余部分照常回答。
+4. 工具返回 `note` 或 `meta.truncated=true` 时：那是重要提示
+   （资料相关度低 / 结果被截断），必须据此调整结论的措辞，不能忽略。
+5. 涉及伤病、疼痛、用药、极端节食：必须加上"建议咨询专业医生或教练"。
+6. 不要声称自己"查过数据库"以外的东西；不要虚构工具调用。
+
+## 回答格式（Markdown）
+- 简短结论 → 关键数据（用分点，带单位）→ 建议
+- 引用知识库资料时标注：> 📚 参考：《来源名称》
+- 字数 150-400 字
+- **不要输出 [[KB:USED]] / [[KB:MISS]] 这类标记**：是否用上知识库由工具调用记录判定。"""
+
+
+def chat_with_agent_loop(
+    question: str,
+    category: Optional[str] = None,
+    user_id: Optional[int] = None,
+    history: Optional[List[dict]] = None,
+) -> ChatResponse:
+    """Agent 循环问答（阶段二）：模型自主决定「调哪个工具、调几次、什么时候能答」。
+
+    <h3>三重上限（缺一个都会失控）</h3>
+    - ``agent_loop_max_steps``（默认 5）：工具执行步数上限 —— 防模型反复调工具停不下来；
+    - ``agent_loop_token_budget``（默认 8000）：累计 token 上限 —— 防多轮上下文成本翻十倍；
+    - ``agent_loop_deadline_seconds``（默认 25s）：墙钟上限 —— **必须小于 Java 的 90s**
+      超时，让 Python 先自己收口返回降级答案，而不是让 Java 超时丢掉整个响应。
+
+    <h3>任何上限触发都要「出答案 + 标记原因」</h3>
+    最糟的失败不是慢，而是**空返回**。因此触顶后还会再发一次**不带工具**的调用，
+    让模型基于已有信息作答，并在 ``degradation_reason`` 里写清为什么停下 ——
+    这是「降级必须可见」在 Agent 时代的延续。
+
+    :raises AgentInputError: 问题为空（HTTP 400）
+    """
+    from .agent_tools import AGENT_TOOL_SCHEMAS, ToolOutcome, execute_tool
+    from .llm import get_llm
+
+    text = str(question or "").strip()
+    if not text:
+        raise AgentInputError("问题不能为空")
+
+    turns = _sanitize_history(history)
+
+    llm = get_llm()
+    if not llm.configured:
+        return _agent_unavailable(text, "未配置 DEEPSEEK_API_KEY，Agent 模式需要真实大模型来判断调用哪些工具")
+    if settings.mock_mode:
+        return _agent_unavailable(text, "MOCK_MODE=true，Agent 模式已跳过（模式开关只影响大模型）")
+
+    max_steps = max(1, int(settings.agent_loop_max_steps))
+    token_budget = max(500, int(settings.agent_loop_token_budget))
+    deadline = max(1.0, float(settings.agent_loop_deadline_seconds))
+
+    messages: List[dict] = [{"role": "system", "content": AGENT_LOOP_SYSTEM_PROMPT}]
+    messages.extend(turns)
+    messages.append({"role": "user", "content": text})
+
+    steps: List[Dict[str, Any]] = []
+    tool_records: List[Dict[str, Any]] = []
+    sources: List[Dict[str, Any]] = []
+    knowledge_used = False
+    tokens = 0
+    llm_turns = 0
+    stopped_by = "max_steps"
+    answer = ""
+
+    started = time.monotonic()
+    while True:
+        if time.monotonic() - started > deadline:
+            stopped_by = "deadline"
+            logger.warning("Agent 循环达到墙钟上限(%.0fs)，强制收口", deadline)
+            break
+        # 每步都要一次模型调用，所以模型轮次上限 = 工具步数上限 + 1（最后一轮用于作答）
+        if llm_turns > max_steps:
+            stopped_by = "max_steps"
+            break
+
+        reply = llm.chat_with_tools(
+            messages,
+            tools=AGENT_TOOL_SCHEMAS,
+            tool_choice="auto",
+            temperature=0.3,
+            max_tokens=1200,
+        )
+        llm_turns += 1
+        tokens += _reply_tokens(reply.usage)
+
+        if tokens > token_budget:
+            stopped_by = "budget"
+            logger.warning("Agent 循环超出 token 预算(%d > %d)，强制收口", tokens, token_budget)
+            break
+
+        if not reply.has_tool_calls:
+            answer = _split_kb_marker(reply.content)[1]
+            stopped_by = "completed"
+            break
+
+        # 只执行"还允许执行"的数量，且单轮最多 2 个（防一次回复里塞一堆调用放大成本）
+        remaining = max_steps - len(steps)
+        planned = reply.tool_calls[:min(2, remaining)]
+        if not planned:
+            stopped_by = "max_steps"
+            break
+
+        # 按 OpenAI 协议：assistant(tool_calls) → 每个 tool_call_id 各一条 tool 消息。
+        # ⚠️ 只把**实际执行的**调用写进 assistant 消息：否则会出现"声明了 3 个调用
+        # 却只回填 2 条结果"，模型侧会判定消息序列非法。
+        messages.append({
+            "role": "assistant",
+            "content": reply.content or None,
+            "tool_calls": [
+                {
+                    "id": call["id"],
+                    "type": "function",
+                    "function": {
+                        "name": call["name"],
+                        "arguments": call.get("raw_arguments")
+                        if isinstance(call.get("raw_arguments"), str)
+                        else json.dumps(call.get("arguments") or {}, ensure_ascii=False),
+                    },
+                }
+                for call in planned
+            ],
+        })
+
+        for call in planned:
+            outcome: ToolOutcome = execute_tool(
+                call["name"],
+                call.get("arguments"),
+                user_id=user_id,
+                fallback_query=text,
+                category=category,
+            )
+            steps.append({
+                "step": len(steps) + 1,
+                "tool": outcome.name,
+                "arguments": call.get("arguments") or {},
+                "ok": outcome.ok,
+                "summary": outcome.summary,
+                "elapsed_ms": outcome.elapsed_ms,
+                "error": outcome.error,
+            })
+            tool_records.append({
+                "name": outcome.name,
+                "arguments": call.get("arguments") or {},
+                "ok": outcome.ok,
+                "knowledge_used": outcome.knowledge_used,
+                "best_score": round(outcome.best_score, 4),
+                "error": outcome.error,
+            })
+            if outcome.knowledge_used:
+                knowledge_used = True
+                # 同一条知识被两轮检索命中时去重，避免 steps 面板里重复展示
+                for item in outcome.sources:
+                    if item not in sources:
+                        sources.append(item)
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call["id"],
+                "content": outcome.content,
+            })
+
+    # ---- 收口：没拿到答案就再发一次**不带工具**的调用，基于已有信息作答 ----
+    if not answer:
+        answer = _finalize_agent_answer(llm, messages, stopped_by)
+
+    latency_ms = int((time.monotonic() - started) * 1000)
+    degraded = stopped_by != "completed" or not knowledge_used
+    reason = _agent_stop_reason(stopped_by, max_steps, deadline, token_budget)
+    if degraded and reason is None:
+        reason = ("本轮未使用知识库（只用了用户数据工具或未调用工具），"
+                  "结论基于数据库中的真实记录")
+
+    return ChatResponse(
+        question=text,
+        answer=answer,
+        sources=[
+            ChatSource(
+                category=item["category"],
+                title=item["title"],
+                content=item["content"],
+                score=item["score"],
+                score_type="cosine",
+            )
+            for item in sources
+        ],
+        generated_at=now_local(),
+        data_source=_agent_data_source(knowledge_used, steps),
+        degraded=degraded,
+        degradation_reason=reason,
+        tool_calls=tool_records,
+        knowledge_used=knowledge_used,
+        steps=steps,
+        agent={
+            "steps_used": len(steps),
+            "tokens": tokens,
+            "latency_ms": latency_ms,
+            "stopped_by": stopped_by,
+            "max_steps": max_steps,
+        },
+    )
+
+
+def _reply_tokens(usage: Optional[dict]) -> int:
+    """从 OpenAI 兼容响应的 usage 里取 token 总数（取不到按 0）。"""
+    if not isinstance(usage, dict):
+        return 0
+    for key in ("total_tokens", "totalTokens"):
+        value = usage.get(key)
+        if isinstance(value, (int, float)):
+            return int(value)
+    prompt = usage.get("prompt_tokens") or 0
+    completion = usage.get("completion_tokens") or 0
+    if isinstance(prompt, (int, float)) and isinstance(completion, (int, float)):
+        return int(prompt) + int(completion)
+    return 0
+
+
+def _finalize_agent_answer(llm, messages: List[dict], stopped_by: str) -> str:
+    """触顶后强制收口：用**不带工具**的调用让模型基于已有信息作答。
+
+    为什么不直接返回一句"我查得太久了"：用户要的是答案。已经查到的数据是有效的，
+    应当把它用起来 —— 只是要如实说明"信息可能不完整"。
+    """
+    try:
+        messages_with_hint = list(messages)
+        messages_with_hint.append({
+            "role": "user",
+            "content": (
+                "（系统提示：由于执行步数/时间限制，本轮检索已停止。"
+                "请**只基于上面已经拿到的数据**给出答案；"
+                "如果关键信息不足，请明确说明缺什么，不要编造。）"
+            ),
+        })
+        text = llm.chat(messages_with_hint, temperature=0.3, max_tokens=1200)
+        return _split_kb_marker(text)[1]
+    except Exception as exc:  # noqa: BLE001 - 收口失败也必须给出可读结果
+        logger.warning("Agent 收口调用失败(%s): %s", stopped_by, exc)
+        return "抱歉，这次查询没有在限定步数内得出结论，请把问题缩小一点再问一次（例如指定某一周或某个动作）。"
+
+
+def _agent_stop_reason(stopped_by: str, max_steps: int, deadline: float, budget: int) -> Optional[str]:
+    """把停止原因翻译成给用户看的中文说明；正常完成返回 None。"""
+    if stopped_by == "completed":
+        return None
+    if stopped_by == "deadline":
+        return f"查询耗时超过 {deadline:.0f} 秒上限，已基于已获取的数据作答，信息可能不完整"
+    if stopped_by == "budget":
+        return f"本轮调用达到 token 预算上限（{budget}），已基于已获取的数据作答，信息可能不完整"
+    if stopped_by == "max_steps":
+        return f"已达到最大执行步数（{max_steps}），已基于已获取的数据作答，信息可能不完整"
+    return f"Agent 执行中止（{stopped_by}）"
+
+
+def _agent_data_source(knowledge_used: bool, steps: List[Dict[str, Any]]) -> str:
+    """结果来源标记（沿用既有取值，前端不需要新增分支）。"""
+    if knowledge_used:
+        return "milvus"
+    if any(step.get("ok") for step in steps):
+        # 用了用户数据工具但没用知识库 —— 这是 Agent 独有的正常状态，不是降级失败
+        return "agent"
+    return "none"
+
+
+def _agent_unavailable(question: str, reason: str) -> ChatResponse:
+    """Agent 模式不可用时的诚实返回（**不让它以 500 结束**）。
+
+    为什么不像其它接口那样抛错让 Java 套兜底文案：那会让用户看到
+    「知识库暂时不可用」，而真实原因是"没配 Key/开了 Mock" —— 这是运维配置问题，
+    不是服务故障。返回一条明确的说明比伪装成故障更有用。
+    """
+    logger.warning("Agent 模式不可用: %s", reason)
+    return ChatResponse(
+        question=question,
+        answer=(
+            f"> ⚠️ Agent 模式当前不可用：{reason}。\n\n"
+            "可以改用普通问答（不查个人数据），或联系管理员完成配置。"
+        ),
+        sources=[],
+        generated_at=now_local(),
+        data_source="none",
+        degraded=True,
+        degradation_reason=reason,
+        tool_calls=[],
+        knowledge_used=False,
+        steps=[],
+        agent={
+            "steps_used": 0,
+            "tokens": 0,
+            "latency_ms": 0,
+            "stopped_by": "error",
+            "max_steps": int(getattr(settings, "agent_loop_max_steps", 0) or 0),
+        },
+    )
 
 
 #: 上下文窗口上限（与 Java 侧 AiChatSessionService 的取值一致；两边都截断，谁都不信谁）

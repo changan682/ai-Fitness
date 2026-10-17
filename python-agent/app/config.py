@@ -114,6 +114,27 @@ class Settings(BaseSettings):
     java_callback_url: str = "http://localhost:8080"
     hmac_secret: str = "change-me-hmac-shared-secret"
 
+    # --- Java 工具网关（阶段二：Agent 查用户数据）---
+    # 与回调**共用同一个 base_url 与 HMAC 密钥**：两者都是「Python → Java 的机器间调用」，
+    # 复用同一套认证能保证口径一致，也少一处配置漂移的风险。
+    # 路径固定为 /api/ai/tool/invoke（工具名放在签名保护的 body 里，
+    # 因为 HMAC 签名原文包含 path，路径带变量会让两端口径难以对齐）。
+    java_tool_path: str = "/api/ai/tool/invoke"
+    # 单次工具调用超时（秒）。工具是同步查询，正常在 100ms 级；
+    # 给 8s 是为了容忍 Java 侧一次慢统计，同时不允许某个工具把整轮 Agent 拖死。
+    java_tool_timeout_seconds: float = 8.0
+
+    # ==================== Agent 循环（阶段二）====================
+    # 三重上限 —— 缺任何一个都会出现"成本/延迟失控"：
+    #   少了步数上限：模型可能反复调工具停不下来；
+    #   少了 token 上限：多轮上下文累积，单次问答成本可能翻十倍；
+    #   少了墙钟上限：Java 侧会先超时（虽然已有 90s，但仍要给 Python 自己收口的机会）。
+    agent_loop_max_steps: int = 5
+    agent_loop_token_budget: int = 8000
+    # ⚠️ 必须小于 Java 的 ai.python.agent-read-timeout（默认 90s），
+    #    让 Python 先自己收口并返回**降级答案**，而不是让 Java 超时丢掉整个响应。
+    agent_loop_deadline_seconds: float = 25.0
+
     # ==================== 姿态评估入参体积上限 ====================
     # Base64 字符串**解码后**允许的最大字节数（默认 1.5MB）。
     # Java 侧已先把图片压缩到 ≤1MB 再转 Base64，这里做防御性校验：
@@ -182,6 +203,18 @@ class Settings(BaseSettings):
     # 故障注入接口开关（GET /agent/v1/_debug/fault）：默认关闭。
     # 打开后可用于验证 Java 侧 RestClient 的降级链路（6001/6002 错误码）。
     enable_fault_injection: bool = False
+
+    # ==================== Agent 模式（阶段一：单轮工具调用）====================
+    # 打开后 /agent/v1/chat 走「工具调用」路径：模型自己决定要不要调 search_knowledge，
+    # 「这轮有没有用知识库」由**工具调用记录**判定（客观证据），
+    # 不再依赖大模型自报 [[KB:USED]] / [[KB:MISS]] 标记。
+    #
+    # 默认关闭的原因：
+    #   1. 这是增强路径，关闭时走已验证的固定编排（四层降级），行为逐字节不变；
+    #   2. 打开后多一次（最多两次）大模型往返，单问延迟会上升；
+    #   3. 回滚成本 = 改这一个环境变量，不需要改代码。
+    # Agent 路径自身出任何异常都会**自动退回**固定编排，不会让问答失败。
+    agent_mode_enabled: bool = False
 
     @property
     def llm_api_configured(self) -> bool:

@@ -80,6 +80,22 @@ public class AIController extends BaseController {
     }
 
     /**
+     * Agent 循环问答（阶段二）—— **与 {@code /chat} 并列**，不是替换。
+     * <p>
+     * 区别：Python 侧会进行多轮「模型 → 工具（查训练/体测/知识库）→ 模型」，
+     * 因此走**独立的长超时客户端**（默认 90s），并把每一步的工具调用记录
+     * 通过 {@code steps} 透传给前端，让用户能验证结论是从哪些数据推出来的。
+     * <p>
+     * 响应字段与 {@code /chat} 完全一致（只**新增** {@code steps} / {@code agent}），
+     * 前端可共用一套类型；出问题时把路径改回 {@code /chat} 即可，无需回滚代码。
+     */
+    @PostMapping("/agent")
+    public Result<AiChatResponse> agentChat(HttpServletRequest request,
+                                            @Valid @RequestBody AiChatRequest req) {
+        return Result.ok(aiProxyService.agentChat(getUserId(request), req));
+    }
+
+    /**
      * 7.6 开启新对话（体验优化批次 C）
      * <p>
      * 只清该会话的 Redis 热层，`t_ai_chat_history` 里的长期历史保留 ——

@@ -133,6 +133,12 @@ ai:
     base-url: ${AI_PYTHON_URL:http://localhost:8000}
     connect-timeout: 3000ms
     read-timeout: 30000ms
+    # Agent 循环专用读取超时 —— 必须比普通接口长：
+    # 一次 Agent 回答 = 最多 5 次模型往返 + 5 次工具往返（实测 5-15s，抖动可能更久），
+    # 沿用 30s 会先超时并报 6001「AI 服务超时」，而 Python 其实只是"还没跑完"。
+    # ⚠️ 必须大于 Python 侧 AGENT_LOOP_DEADLINE_SECONDS（默认 25s），
+    #    让 Python 先自己收口返回降级答案，而不是让 Java 超时丢掉整个响应。
+    agent-read-timeout: ${AI_AGENT_READ_TIMEOUT:90000ms}
   fallback:
     summary: "AI 教练暂时走神了，请稍后再试 😅"
     chat: "知识库暂时不可用，正在紧急恢复中 🛠️"

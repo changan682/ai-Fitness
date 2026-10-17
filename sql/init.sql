@@ -369,3 +369,28 @@ CREATE TABLE IF NOT EXISTS t_ai_chat_history (
     INDEX       idx_user_created (user_id, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI问答历史（长期记忆）';
 
+-- ==================== 12. Agent 运行审计（阶段二） ====================
+-- 为什么需要：Agent 的回答是非确定性的（同一个问题可能调 1 个或 3 个工具），
+-- 线上出问题时无法靠复现定位，唯一能查的就是"当时它到底做了什么"。
+-- 与 t_ai_chat_history 的分工：后者存"用户看到的那句话"（热路径，每次问答都读写）；
+-- 本表存"系统为这句话做了什么"（冷路径，只写不读），分开避免热表越来越重。
+-- 由每日 03:00 的清理任务与问答历史一同按 90 天保留期清理。
+CREATE TABLE IF NOT EXISTS t_ai_agent_run (
+    id              BIGINT       AUTO_INCREMENT  PRIMARY KEY,
+    user_id         BIGINT       NOT NULL        COMMENT '用户ID',
+    session_id      VARCHAR(36)                  COMMENT '会话ID（UUID，可为空）',
+    question        TEXT         NOT NULL        COMMENT '用户原始问题',
+    steps_json      TEXT                         COMMENT 'Agent 步骤记录（JSON 数组）',
+    tools_used      VARCHAR(255)                 COMMENT '本次用到的工具名（逗号分隔）',
+    steps_used      INT          DEFAULT 0       COMMENT '实际执行步数',
+    tokens          INT          DEFAULT 0       COMMENT '累计 token',
+    latency_ms      BIGINT       DEFAULT 0       COMMENT '整轮耗时（毫秒）',
+    stopped_by      VARCHAR(32)                  COMMENT 'completed/max_steps/deadline/budget/tool_error/error',
+    data_source     VARCHAR(20)                  COMMENT 'milvus/llm_only/none/agent',
+    degraded        TINYINT      DEFAULT 0       COMMENT '是否为降级结果：0-否 1-是',
+    created_at      DATETIME     DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    INDEX           idx_user_created (user_id, created_at),
+    INDEX           idx_created (created_at),
+    INDEX           idx_stopped_by (stopped_by)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Agent 运行审计（阶段二）';
+

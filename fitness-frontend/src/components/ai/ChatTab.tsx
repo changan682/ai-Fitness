@@ -1,5 +1,5 @@
 import { ClearOutlined, SendOutlined } from '@ant-design/icons'
-import { Alert, App, Button, Card, Collapse, Empty, Input, Select, Skeleton, Space, Tag } from 'antd'
+import { Alert, App, Button, Card, Collapse, Empty, Input, Select, Skeleton, Space, Switch, Tag, Tooltip } from 'antd'
 import { useEffect, useRef, useState } from 'react'
 import { ApiError } from '@/api/client'
 import aiApi from '@/api/aiApi'
@@ -36,6 +36,11 @@ export default function ChatTab() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [category, setCategory] = useState<string | undefined>(undefined)
+  /**
+   * 深度分析（Agent 模式）—— 开启后后端会真的去查我的训练/体测数据再作答，
+   * 耗时从 2-4s 涨到 5-15s，因此做成**用户显式选择**而不是默认行为。
+   */
+  const [agentMode, setAgentMode] = useState(false)
   const [sending, setSending] = useState(false)
   /** 正在「根据身体状态生成问题」（与 sending 分开：这一步还没开始问答，气泡里不该有占位） */
   const [consulting, setConsulting] = useState(false)
@@ -68,7 +73,10 @@ export default function ChatTab() {
     setSending(true)
 
     try {
-      const data = await aiApi.chat({ question, category, sessionId })
+      // Agent 模式会多轮调工具（查训练/体测/知识库），耗时更长但能给出**基于真实数据**的结论
+      const data = agentMode
+        ? await aiApi.agentChat({ question, category, sessionId })
+        : await aiApi.chat({ question, category, sessionId })
 
       // 后端可能新建了会话：存下来，下一轮才有上下文
       if (data.sessionId && data.sessionId !== sessionId) {
@@ -89,6 +97,10 @@ export default function ChatTab() {
                 dataSource: data.dataSource,
                 degraded: data.degraded,
                 degradationReason: data.degradationReason,
+                // Agent 的每一步也要带进来 —— 让用户能验证结论用了哪些数据
+                steps: data.steps ?? null,
+                agent: data.agent ?? null,
+                knowledgeUsed: data.knowledgeUsed ?? null,
               }
             : m,
         ),
@@ -187,6 +199,17 @@ export default function ChatTab() {
             onChange={setCategory}
             disabled={sending}
           />
+          {/*
+            深度分析开关：Agent 模式会真的去查用户的训练/体测数据（多轮工具调用），
+            耗时从 2-4s 涨到 5-15s，所以做成显式选择而不是默认开启。
+            提示文案要写清代价，否则用户只会觉得"AI 变慢了"。
+          */}
+          <Tooltip title="开启后 AI 会查你的训练记录、体测趋势再回答（更准，但需要 5-15 秒）">
+            <Space size={4}>
+              <Switch size="small" checked={agentMode} onChange={setAgentMode} disabled={sending} />
+              <span className="text-xs text-gray-500">深度分析</span>
+            </Space>
+          </Tooltip>
           <Button icon={<ClearOutlined />} onClick={handleClear} disabled={messages.length === 0}>
             新对话
           </Button>
@@ -273,6 +296,49 @@ export default function ChatTab() {
                   )}
 
                   <MarkdownView content={m.content} />
+
+                  {/*
+                    「AI 用了什么数据」—— Agent 模式专属（阶段二）。
+                    为什么必须展示：Agent 的数字来自多次工具调用，只给结论不给依据时，
+                    用户无法分辨"真的查了数据"和"模型编了一个看起来合理的数"。
+                    这不只是锦上添花，而是本项目「降级/过程必须可见」原则的延续。
+                  */}
+                  {m.steps && m.steps.length > 0 && (
+                    <div className="mt-2">
+                      <div className="mb-1 text-xs text-gray-500">
+                        🔧 AI 查了 {m.steps.length} 项数据
+                        {m.agent ? ` · 耗时 ${(m.agent.latencyMs / 1000).toFixed(1)}s` : ''}
+                        {m.agent?.stoppedBy && m.agent.stoppedBy !== 'completed'
+                          ? ' · 未在限定步数内完成'
+                          : ''}
+                      </div>
+                      <Collapse
+                        size="small"
+                        items={m.steps.map((step) => ({
+                          key: String(step.step),
+                          label: (
+                            <span className="text-xs">
+                              <Tag color={step.ok ? 'geekblue' : 'red'}>{step.tool}</Tag>
+                              {step.summary}
+                              {typeof step.elapsedMs === 'number' && step.elapsedMs > 0 && (
+                                <span className="ml-2 text-gray-400">{step.elapsedMs}ms</span>
+                              )}
+                            </span>
+                          ),
+                          children: (
+                            <div className="text-xs text-gray-600">
+                              {step.error ? (
+                                <div className="text-red-500">失败原因：{step.error}</div>
+                              ) : null}
+                              <div className="text-gray-400">
+                                参数：{JSON.stringify(step.arguments ?? {})}
+                              </div>
+                            </div>
+                          ),
+                        }))}
+                      />
+                    </div>
+                  )}
 
                   {m.sources && m.sources.length > 0 && (
                     <div className="mt-2">

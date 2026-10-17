@@ -55,6 +55,21 @@ export const aiApi = {
     http.post<ChatResponse>('/ai/chat', data, { timeout: AI_TIMEOUT_MS }),
 
   /**
+   * Agent 循环问答（阶段二）—— 能查用户自己的训练/体测数据再作答
+   * <p>
+   * 与 {@link chat} 的区别：后端会进行多轮「模型 → 工具（查数据/查知识库）→ 模型」，
+   * 耗时可达数十秒，因此走单独的长超时；响应额外带 `steps`（用了哪些数据）
+   * 与 `agent`（步数/耗时/停止原因）。
+   * <p>
+   * 超时用 {@link AI_MULTIMODAL_TIMEOUT_MS}（90s）而不是普通的 60s：
+   * Java 侧给这个端点单独配了 90s 的读取超时，前端若用 60s 会先自己断开，
+   * 用户看到"请求超时"而后端其实还在正常跑。
+   */
+  agentChat: (data: ChatRequest): Promise<ChatResponse> =>
+    http.post<ChatResponse>('/ai/agent', data, { timeout: AI_MULTIMODAL_TIMEOUT_MS }),
+
+
+  /**
    * 7.6 开启新对话：让后端清掉该会话的 Redis 热层
    * <p>
    * 前端换掉 sessionId 本身就已经"断开上下文"了，这里再调一次是为了顺手释放热层内存；

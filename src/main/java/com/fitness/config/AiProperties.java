@@ -32,6 +32,21 @@ public class AiProperties {
 
         /** 读取超时（规范建议 30s：大模型生成较慢，但必须有上限） */
         private Duration readTimeout = Duration.ofSeconds(30);
+
+        /**
+         * Agent 循环的读取超时 —— **必须比单次调用更长**
+         * <p>
+         * 一次 Agent 回答 = 最多 5 次模型往返 + 最多 5 次工具往返，实测 5–15s，
+         * 抖动时很容易超过 30s。若沿用 {@link #readTimeout}，Java 会先抛 6001「AI 服务超时」，
+         * 而 Python 其实只是"还没跑完"—— 用户看到的错误信息是错的。
+         * <p>
+         * 因此给 Agent 单独的客户端与更高的上限，**不改全局 30s**
+         * （普通接口不需要这么长的等待，放宽会掩盖真正的超时问题）。
+         * <p>
+         * ⚠️ 必须大于 Python 侧的循环死线（默认 25s），让 Python 先自己收口并返回降级答案，
+         * 而不是让 Java 超时把整个响应丢掉。
+         */
+        private Duration agentReadTimeout = Duration.ofSeconds(90);
     }
 
     @Data

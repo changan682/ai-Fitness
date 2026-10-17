@@ -57,6 +57,7 @@ public class ScheduledTasks {
     private final WeeklyPlanProducer weeklyPlanProducer;
     private final ObjectMapper objectMapper;
     private final AiChatHistoryRepository aiChatHistoryRepository;
+    private final com.fitness.repository.AiAgentRunRepository aiAgentRunRepository;
 
     /**
      * 每日20:00 — 检查当天有无训练记录，无则推送提醒
@@ -221,6 +222,17 @@ public class ScheduledTasks {
             int deleted = aiChatHistoryRepository.deleteByCreatedAtBefore(deadline);
             log.info("=== 问答历史清理完成: 删除 {} 条（{} 之前，保留期 {} 天）===",
                     deleted, deadline, CHAT_HISTORY_RETENTION_DAYS);
+
+            // Agent 审计表同样只写不读，且每轮 Agent 问答都写一行 —— 不清理会无限增长。
+            // 与问答历史共用同一保留期与同一把防重锁（两者都是"AI 相关的冷数据"）。
+            // 刻意放在同一个任务里：多一个 @Scheduled 就多一份锁与一份告警面，收益不抵成本。
+            try {
+                int purged = aiAgentRunRepository.deleteByCreatedAtBefore(deadline);
+                log.info("=== Agent 审计清理完成: 删除 {} 条 ===", purged);
+            } catch (Exception e) {
+                // 审计清理失败不能影响问答历史清理的结论（两者已分别提交）
+                log.warn("Agent 审计清理失败（不影响问答历史清理）: {}", e.getMessage());
+            }
         } catch (Exception e) {
             log.error("问答历史清理失败", e);
         } finally {
