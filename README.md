@@ -3,6 +3,10 @@
 面向健身人群的智能训练管理系统：**Java 负责业务与鉴权、Python 负责 AI、Milvus 负责语义检索、RabbitMQ 负责异步复盘**。
 本科毕业设计项目，采用「Java BFF + Python AI Agent」跨语言架构：前端只与 Java 交互，Java 通过 HTTP 调 Python，耗时任务走消息队列异步回调。
 
+> **AI 侧的两次演进（见第八节）**：第 5 周的问答是「固定先检索、再生成」的串行 RAG；
+> 之后把它改成 **Agent 化**——检索降级为模型可选的工具（阶段一），再升级为
+> **多步工具调用循环**，模型可以自己决定去查用户的真实训练/体测数据（阶段二）。
+
 ---
 
 ## 一、功能概览
@@ -29,6 +33,8 @@
 | 健身知识库 RAG 问答 | Embedding → Milvus Top-5 检索 → LLM 生成（**带引用来源**），四层降级；**支持多轮对话记忆** |
 | **身体状态主动问询** | Java 组装身体数据快照 → LLM 生成追问与建议；无 Key 时走阈值规则引擎（标 `rule_based`） |
 | 知识库健康检查 | 真实 Milvus 连接状态、文档数、索引参数、最后更新时间 |
+| **Agent 问答（阶段一）** | 检索从「必经步骤」降为**可选工具** `search_knowledge`：闲聊不烧检索、数据题改查库；单轮工具调用，开关 `AGENT_MODE_ENABLED`（默认关） |
+| **Agent 多步循环（阶段二）** | ReAct 循环 + **4 个工具**（1 个本地检索 + 3 个远程查用户数据，经 Java HMAC 工具网关）+ **三重上限**（5 步 / 8000 token / 25s）+ 每步落 `t_ai_agent_run` 审计表 |
 | **每周复盘（异步）** | Java 发 MQ → Python pika 消费 → LLM 生成下周计划 → HMAC 签名回调 Java 落库 |
 
 **前端（React + TS，5 个页面）**
@@ -37,7 +43,7 @@
 |:---|:---|
 | 登录 / 注册 | 手机号密码登录、注册（密码强度指示、二次确认）、记住我（localStorage / sessionStorage 二选一）、被踢下线后登录回跳原页面 |
 | 训练看板 | 统计卡片（数字滚动）、快捷录入（动态增减动作条目 + 容量实时预览 + Ctrl+Enter 提交）、今日记录行内编辑与删除、**乐观更新 + 失败回滚** |
-| AI 助手 | 4 个 Tab：训练总结（Markdown + 缓存时间标记）、动作推荐（卡片错峰淡入）、姿态评估（拖拽上传 + 评分环）、健身问答（RAG 气泡 + 引用来源折叠 + 快捷提问 + **多轮记忆/新对话** + **按身体状态主动提问**） |
+| AI 助手 | 4 个 Tab：训练总结（Markdown + 缓存时间标记）、动作推荐（卡片错峰淡入）、姿态评估（拖拽上传 + 评分环）、健身问答（RAG 气泡 + 引用来源折叠 + 快捷提问 + **多轮记忆/新对话** + **按身体状态主动提问** + **「深度分析」Agent 开关与「AI 查了哪些数据」步骤面板**） |
 | 数据趋势 | ECharts 三图：体重（原始虚线 + 7 日滑动平均实线）、每周容量柱状+次数折线、围度多折线；点柱子看该周训练明细 |
 | 个人档案 | 档案编辑（编辑/查看模式切换）+ 独立的体测录入表单 + **头像上传** + **「AI 主动追问」卡片**（点击才生成） |
 
@@ -57,6 +63,10 @@
 | 向量库 | Milvus v2.6.0（Docker）+ pymilvus 2.6.16，`IVF_FLAT + COSINE`，知识库 200 条 |
 | Embedding | 阿里云百炼 `text-embedding-v3`（768 维；可切本地 `text2vec-base-chinese`） |
 | 前端 | React 18.3 + TypeScript 5.5（strict）+ Vite 5.4 + Ant Design 5 + Tailwind 3 + React Router 6 + Zustand 4.5 + TanStack Query 5 + Axios + ECharts 5 + react-markdown |
+
+> **Agent 编排是手写的，没有引入 LangChain / LangGraph**：本项目只需要「调模型 → 执行工具 → 回填结果」这一个循环，
+> 手写约 200 行（含三重上限与审计）比拖进一个抽象层更好调试、更好讲清楚，也避免为一个循环引入额外依赖面。
+> 代价是向量检索、工具 schema 等都要自己维护——但那些本来就是手写的。
 
 ---
 
@@ -93,6 +103,18 @@
 **为什么这样分工**：前端完全不知道 Python 与 Milvus 的存在（Java 作为 BFF）；
 实时 AI 走 HTTP 同步返回，耗时复盘走 MQ 异步 + 回调，避免请求线程被大模型拖死。
 
+**Agent 模式多出的两条箭头**（阶段二，均默认不启用）：
+
+```
+前端 ──POST /api/ai/agent──▶ Java ──POST /agent/v1/agent──▶ Python（ReAct 循环）
+                                    ◀──POST /api/ai/tool/invoke──┘
+                                        （Python → Java，HMAC 验签，取用户数据）
+```
+
+这里有个**方向容易搞反**的点：Agent 需要「用户的训练/体测数据」，而数据库在 Java 侧。
+所以工具不是 Python 直接查库，而是**回调 Java 的只读工具网关**——数据访问仍由 Java 把关，
+Python 拿不到数据库连接，越权风险不因引入 Agent 而扩大。
+
 ---
 
 ## 四、目录结构
@@ -104,7 +126,7 @@ agent2/
 ├── .dockerignore
 ├── docker-compose.yml            # 默认只起 Milvus；另有 local-mw / apps 两组可选 profile
 ├── .env.example                  # Java 侧环境变量模板 → 复制为 .env
-├── sql/init.sql                  # 10 张表的建表脚本（含索引与注释）
+├── sql/init.sql                  # 12 张表的建表脚本（含索引与注释）
 ├── src/main/java/com/fitness/    # Java 源码
 │   ├── controller/  service/  repository/  entity/  dto/
 │   ├── config/                   # JWT / Redis / RabbitMQ / CORS / RestClient
@@ -112,12 +134,12 @@ agent2/
 │   ├── cache/                    # 缓存封装、锁、Token 黑名单
 │   ├── task/                     # 定时任务 + 死信队列监控
 │   └── util/                     # JWT、HMAC 验签、图片压缩
-├── src/test/java/com/fitness/    # Java 测试（249 项）
+├── src/test/java/com/fitness/    # Java 测试（279 项）
 ├── python-agent/                 # Python AI 服务（详见其 README）
-│   ├── app/                      # 路由 / Agent / LLM / 多模态 / Milvus / MQ 消费者
+│   ├── app/                      # 路由 / Agent（单轮 + 多步循环）/ 工具 / LLM / 多模态 / Milvus / MQ 消费者
 │   ├── data/seed_knowledge.json  # 知识库种子数据（200 条，5 大分类）
-│   ├── scripts/                  # Key 探活、入库工具、端到端验收脚本
-│   ├── tests/                    # pytest（401 项）
+│   ├── scripts/                  # Key 探活、入库工具、端到端验收脚本（含 Agent 两个阶段的验收）
+│   ├── tests/                    # pytest（464 项）
 │   ├── Dockerfile                # Python 生产镜像
 │   └── docker-entrypoint.sh      # 等 Milvus 就绪后再起 FastAPI
 ├── fitness-frontend/             # React + TypeScript 前端（第 8 周）
@@ -176,8 +198,9 @@ mysql -h 192.168.199.128 -u root -p < sql/init.sql
 > ```powershell
 > mysql -h 192.168.199.128 -u root -p < sql/migration-20260921-avatar.sql        # t_user 加 avatar_url
 > mysql -h 192.168.199.128 -u root -p < sql/migration-20260921-chat-history.sql  # 新建问答历史表
+> mysql -h 192.168.199.128 -u root -p < sql/migration-20260922-agent-run.sql    # 新建 Agent 执行审计表
 > ```
-> 两个脚本都可重复执行（前者用 information_schema 判断列是否存在，后者是 `IF NOT EXISTS`）。
+> 三个脚本都可重复执行（前者用 information_schema 判断列是否存在，后者是 `IF NOT EXISTS`）。
 
 ### 2. 启动 Milvus（本机 Docker）
 
@@ -249,15 +272,26 @@ npm run dev            # http://localhost:5173
 ## 七、测试与验收
 
 ```powershell
-# Java：249 项（含「实体 ↔ init.sql 列名契约」「JWT 白名单配置」测试）
+# Java：279 项（含「实体 ↔ init.sql 列名契约」「JWT 白名单配置」「Agent 跨语言字段契约」测试）
 mvn test
 
-# Python：426 项（不联网）
+# Python：464 项（不联网）
 cd python-agent; E:\Anaconde\python.exe -m pytest tests -q
 
-# 前端：36 项（严格模式类型检查 + 单元/渲染测试 + 生产构建）
+# 前端：42 项（严格模式类型检查 + 单元/渲染测试 + 生产构建）
 cd fitness-frontend; npm run typecheck; npm test; npm run build
 ```
+
+**Agent 模式怎么开**（默认关闭，因为它比常规问答慢 2-5 倍）：
+
+```powershell
+# python-agent\.env
+AGENT_MODE_ENABLED=true
+```
+
+前端问答面板里再打开「深度分析」开关，请求就会走 `/api/ai/agent` 而不是 `/ai/chat`。
+两层开关是**有意为之**：Python 侧开关是服务级总闸（不让 Agent 悄悄烧钱），
+前端开关是单次请求的选择（用户自己决定这次要不要多等几秒）。
 
 **端到端验收脚本**（需对应服务在线）：
 
@@ -271,6 +305,8 @@ cd fitness-frontend; npm run typecheck; npm test; npm run build
 | `scripts/smoke_test.py` | Python 6 个接口 + 4 条错误路径（31 项） | Python |
 | `scripts/ingest_knowledge.py --stats` | 知识库统计与索引参数一致性 | Milvus |
 | `scripts/verify_weekly_plan_chain.py` | **每周复盘异步全链路**（发送→消费→回调→验签→落库） | Java + RabbitMQ |
+| `scripts/verify_agent_stage1.py` | **Agent 阶段一**：检索变可选工具（数据题不检索、知识题才调 `search_knowledge`），11 项 | Python + Java + Milvus |
+| `scripts/verify_agent_stage2.py` | **Agent 阶段二**：多步循环 + 工具网关 + 审计表 + 三重上限，12 项 | Python + Java + Milvus |
 
 ---
 
@@ -285,6 +321,7 @@ cd fitness-frontend; npm run typecheck; npm test; npm run build
 | 第 7 周 | RabbitMQ 异步闭环：发送 → 消费 → LLM → 回调 → 验签落库 | ✅ |
 | 第 8 周 | React+TS 前端（5 个页面 / 33 个接口联调）+ Docker Compose 编排 + 文档收尾 | ✅ |
 | 体验优化 | **头像自定义**、**问答四层降级（知识库没覆盖 → 通用知识并标注）**、**多轮对话记忆**、**身体状态主动问询** | ✅ 详见 `优化计划书-头像与AI对话增强.md` |
+| Agent 化 | **阶段一**：检索从必经步骤降为可选工具；**阶段二**：多步工具调用循环 + 4 个工具（含 3 个远程查用户数据）+ 三重上限 + 执行审计表 + 前端步骤面板 | ✅ 设计要点见第九节，验收见 `scripts/verify_agent_stage1.py` / `verify_agent_stage2.py` |
 
 ---
 
@@ -308,6 +345,12 @@ cd fitness-frontend; npm run typecheck; npm test; npm run build
 | 问答相关性判定 | 阈值只当地板（0.55）挡明显无关的资料；「这轮有没有用知识库」由大模型自报 `[[KB:USED]]`/`[[KB:MISS]]` 决定。实测证明同领域无关问题也能拿到 0.82 余弦分，纯阈值判不出来 |
 | 对话记忆 | Redis 热层（TTL 2h，窗口 6 轮/4000 字符）+ `t_ai_chat_history` 长期层；热层未命中回表回填（read-through），任何一侧故障都只降级为"没有记忆"而不影响回答 |
 | 头像存储 | 落本地磁盘、库里只存带版本号的 URL；文件名由服务端生成（防路径穿越），上传走魔数校验 + 真实解码；读取接口进 JWT 白名单（`<img>` 不带 Authorization 头） |
+| 检索为什么变工具 | 串行 RAG 的检索是**必经步骤**：问「我上周练得怎么样」也要先查一遍健身知识库，既慢又拿到无关资料。改成工具后由模型决定要不要查——数据题直接调数据工具，知识题才检索。`/ai/chat` 完全没改，Agent 是**并列的新路径**而不是替换 |
+| Agent 怎么防跑飞 | 三重上限同时生效：**5 步 / 8000 token / 25s**（25s < Java 的 `agent-read-timeout` 90s < 前端 axios 90s，越靠前越先自己收口）。任一条触发就**再发一次不带工具调用的请求**让模型基于已有数据收口，而不是返回空答案 |
+| 工具网关方向 | Agent 要用「用户数据」，而数据库在 Java 侧，所以工具是 **Python 回调 Java** 的只读网关 `/api/ai/tool/invoke`（HMAC 验签）。数据访问仍由 Java 把关，Python 不获得数据库连接。网关用**固定 path**（工具名放 body），因为 HMAC 签名原文包含 path，一 tool 一路径会让签名原文不可预测 |
+| 降级语义 | `degraded` 表示「这轮打了折扣」，**不是**「没用知识库」：用了真实训练数据是**更好**的路径。真正的降级只有两种——① 三重上限提前收口；② 一个工具都没成功、答案纯靠模型记忆。搞错这条会给用户弹「降级回答」，等于把好答案说成坏答案 |
+| 跨语言 Map 字段 | `steps`/`agent` 在 Java 侧是不定形 Map，`@JsonProperty` 对它们不生效，Python 的 `stopped_by`/`elapsed_ms` 会原样透传 → 前端读 `stoppedBy` 得到 `undefined`，**界面空白且不报错**。因此在 BFF 出口显式做一层 `renameKeys()`，并用 `AiAgentContractTest` 锁死字段名 |
+| 执行审计 | 每次 Agent 运行落一行 `t_ai_agent_run`（步数/token/耗时/停止原因/用到的工具），90 天随问答历史一起清理。没有它，线上只能看到「用户说答案不对」而无法复盘是哪一步取数错了 |
 
 ---
 
@@ -330,3 +373,6 @@ cd fitness-frontend; npm run typecheck; npm test; npm run build
    但整个目录属于本机运行状态，删掉只影响已上传的头像显示，不影响其它功能。
 9. **新增接口一律加性演进**：响应只加字段不改语义；跨语言 DTO 必须显式 `@JsonProperty`
    （Java 侧带 `@JsonIgnoreProperties(ignoreUnknown = true)`，未声明字段会被静默丢弃）。
+10. **Agent 默认关闭**（`AGENT_MODE_ENABLED=false`）：Agent 单次 5-15s，常规问答 2-4s，默认开会让所有人变慢。
+    演示/答辩时改 `python-agent/.env` 再把前端「深度分析」开关打开即可；
+    只想退回常规问答，把开关关掉就行（`/ai/chat` 那条链路自始至终没被改过）。

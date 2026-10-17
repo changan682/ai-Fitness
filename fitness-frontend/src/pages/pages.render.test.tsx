@@ -163,6 +163,8 @@ vi.mock('@/api/aiApi', () => ({
     // 批次 D：身体状态主动问询。新增的 api 方法必须登记在这里，
     // 否则调用处拿到的是 undefined，报错会落在被测代码上而不是测试上
     bodyConsult: vi.fn(),
+    // 阶段二：Agent 模式走独立端点（超时预算更大），同样必须登记
+    agentChat: vi.fn(),
   },
 }))
 
@@ -781,6 +783,139 @@ describe('AI 身体状态问询（批次 D）', () => {
       await screen.findByText('暂时没有可追问的问题，先记录几天身体数据吧'),
     ).toBeInTheDocument()
     // 关键：不能把空字符串当问题发出去 —— 那会白白烧一次问答的大模型调用
+    expect(aiApi.chat).not.toHaveBeenCalled()
+  })
+})
+
+// ==================== Agent 模式（阶段二） ====================
+
+describe('Agent 模式（阶段二）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    window.sessionStorage.clear()
+  })
+
+  /** 数据题的真实返回形态：1 步工具调用 + Agent 元信息 */
+  const agentDataResponse = {
+    question: '我上周练得怎么样？',
+    answer: '## 结论\n上周你练了 4 天，总容量 4200 kg。',
+    sources: [],
+    // 用了用户真实数据 → 这是 Agent 独有的**正常**状态，不是降级
+    dataSource: 'agent' as const,
+    degraded: false,
+    degradationReason: null,
+    sessionId: 'agent-session-1',
+    generatedAt: '2026-09-22 19:00:00',
+    steps: [
+      {
+        step: 1,
+        tool: 'get_weekly_stats',
+        arguments: { weekStart: '2026-09-14' },
+        ok: true,
+        summary: '训练 4 天 / 容量 4200kg',
+        elapsedMs: 120,
+        error: null,
+      },
+    ],
+    agent: {
+      stepsUsed: 1,
+      tokens: 3331,
+      latencyMs: 3483,
+      stoppedBy: 'completed',
+      maxSteps: 5,
+    },
+  }
+
+  /** 输入框不是受控快捷项时的手动提问路径（快捷问题只有固定三条，数据题只能手打） */
+  async function ask(user: ReturnType<typeof userEvent.setup>, question: string) {
+    const box = await screen.findByPlaceholderText(/输入问题/)
+    await user.type(box, question)
+    await user.keyboard('{Enter}')
+  }
+
+  it('返回 steps 时展示「AI 查了 N 项数据」面板：工具名、结果摘要、耗时都要能看见', async () => {
+    // 守的是「过程必须可见」：Agent 的数字来自多次工具调用，
+    // 只给结论不给依据时，用户无法分辨"真的查了数据"和"模型编了一个看起来合理的数"。
+    // 若有人把这段面板删掉，界面依然"正常"，只有这条用例会红。
+    const aiApi = (await import('@/api/aiApi')).default
+    vi.mocked(aiApi.chat).mockResolvedValue(agentDataResponse)
+
+    const user = userEvent.setup()
+    renderWithProviders(<AIAssistantPage />)
+
+    await user.click(await screen.findByRole('tab', { name: '💬 健身问答' }))
+    await ask(user, '我上周练得怎么样？')
+
+    expect(await screen.findByText(/AI 查了 1 项数据/)).toBeInTheDocument()
+    // 工具名（让用户知道我查的是哪张表，而不是笼统的"查了数据"）
+    expect(screen.getByText('get_weekly_stats')).toBeInTheDocument()
+    // 该步的真实结果摘要
+    expect(screen.getByText(/训练 4 天 \/ 容量 4200kg/)).toBeInTheDocument()
+    // 总耗时（3483ms → 3.5s）
+    expect(screen.getByText(/耗时 3\.5s/)).toBeInTheDocument()
+  })
+
+  it('数据题（dataSource=agent、正常完成）不得显示「降级回答」（否则等于把好答案说成坏答案）', async () => {
+    // 这条守的是一个真实踩过的坑：早期实现里 degraded 被算成
+    // `stopped_by != completed || !knowledge_used`，于是"只用了训练数据、没用知识库"
+    // 这类**更好**的回答被标成降级，用户会看到「降级回答」四个字。
+    const aiApi = (await import('@/api/aiApi')).default
+    vi.mocked(aiApi.chat).mockResolvedValue(agentDataResponse)
+
+    const user = userEvent.setup()
+    renderWithProviders(<AIAssistantPage />)
+
+    await user.click(await screen.findByRole('tab', { name: '💬 健身问答' }))
+    await ask(user, '我上周练得怎么样？')
+    await screen.findByText(/AI 查了 1 项数据/)
+
+    expect(screen.queryByText(/降级回答/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/通用知识回答/)).not.toBeInTheDocument()
+    // 也不应误报"没在限定步数内完成"
+    expect(screen.queryByText(/未在限定步数内完成/)).not.toBeInTheDocument()
+  })
+
+  it('触发步数上限时明确提示「未在限定步数内完成」（回答可能不完整，必须说出来）', async () => {
+    const aiApi = (await import('@/api/aiApi')).default
+    vi.mocked(aiApi.chat).mockResolvedValue({
+      ...agentDataResponse,
+      degraded: true,
+      degradationReason: '达到最大执行步数（5 步），回答基于已获取的数据',
+      agent: { ...agentDataResponse.agent, stoppedBy: 'max_steps' },
+    })
+
+    const user = userEvent.setup()
+    renderWithProviders(<AIAssistantPage />)
+
+    await user.click(await screen.findByRole('tab', { name: '💬 健身问答' }))
+    await ask(user, '我上周练得怎么样？')
+
+    expect(await screen.findByText(/未在限定步数内完成/)).toBeInTheDocument()
+    expect(screen.getByText(/达到最大执行步数/)).toBeInTheDocument()
+  })
+
+  it('打开「深度分析」后请求走 agentChat（独立端点、更长超时），且不再调用 chat', async () => {
+    // 两个端点的时间预算完全不同（chat 30s / agent 90s）。
+    // 若开关只改界面不改请求，用户会以为"深度分析"生效了，实际走的是旧路径 ——
+    // 功能看起来完全正常，只有这条用例能发现。
+    const aiApi = (await import('@/api/aiApi')).default
+    vi.mocked(aiApi.agentChat).mockResolvedValue(agentDataResponse)
+
+    const user = userEvent.setup()
+    renderWithProviders(<AIAssistantPage />)
+
+    await user.click(await screen.findByRole('tab', { name: '💬 健身问答' }))
+
+    // 默认关闭：开关必须是 off（Agent 更慢更贵，不能默认给所有人开）
+    const toggle = await screen.findByRole('switch')
+    expect(toggle).not.toBeChecked()
+    await user.click(toggle)
+    expect(toggle).toBeChecked()
+
+    await ask(user, '我上周练得怎么样？')
+
+    await waitFor(() => expect(aiApi.agentChat).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(aiApi.agentChat).mock.calls[0][0].question).toBe('我上周练得怎么样？')
     expect(aiApi.chat).not.toHaveBeenCalled()
   })
 })

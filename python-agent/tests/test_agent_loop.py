@@ -148,10 +148,12 @@ def test_single_tool_then_answer(monkeypatch, make_settings):
     assert result.steps[0]["tool"] == "get_weekly_stats"
     assert result.steps[0]["ok"] is True
     assert result.steps[0]["summary"] == "训练 4 天"
-    # 只用了用户数据工具、没用知识库 → data_source=agent（Agent 独有状态，不是失败）
+    # 只用了用户数据工具、没用知识库 → data_source=agent（Agent 独有状态）
     assert result.data_source == "agent"
     assert result.knowledge_used is False
-    assert result.degraded is True   # 未用知识库 → 如实标记
+    # 关键语义：查到了真实用户数据是**更好**的路径，不是降级。
+    # 若这里标成 True，前端会给用户弹「降级回答」，等于把好答案说成坏答案。
+    assert result.degraded is False
     # 工具调用时必须带上 userId（远程工具靠它确定代表谁取数）
     assert env.tool_calls[0]["kwargs"]["user_id"] == 36
 
@@ -166,6 +168,10 @@ def test_no_tool_call_answers_directly(monkeypatch, make_settings):
     assert result.steps == []
     assert result.agent["steps_used"] == 0
     assert llm.final_calls == 0
+    # 一个工具都没调 → 答案纯靠模型记忆，这才是该如实标记的"降级"（与上面的数据题相反）
+    assert result.degraded is True
+    assert "仅基于通用知识" in (result.degradation_reason or "")
+    assert result.agent["stopped_by"] == "completed"   # 收口正常，只是没有依据
 
 
 def test_knowledge_tool_marks_milvus_and_dedupes_sources(monkeypatch, make_settings):
@@ -320,6 +326,8 @@ def test_tool_error_is_fed_back_and_model_can_still_answer(monkeypatch, make_set
     assert result.steps[0]["error"] == "工具网关超时"
     assert result.data_source == "none"      # 没拿到任何有效数据
     assert "取不到" in result.answer         # 模型如实告知，而不是编造
+    # 工具全失败 = 没有依据 → 必须标降级
+    assert result.degraded is True
     # 错误也要回填给模型，否则它会以为工具没被调用
     tool_msg = llm.tool_turn_messages[1][-1]
     assert "工具网关超时" in tool_msg["content"]

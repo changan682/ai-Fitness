@@ -94,12 +94,17 @@ class EntityDdlContractTest {
     @DisplayName("每个实体的物理列名都必须存在于 init.sql 的建表语句中")
     void everyMappedColumnMustExistInDdl() {
         // 先证明「解析器真的读懂了 DDL」与「实体真的被扫到了」，否则本测试可能空跑通过
-        assertTrue(ddlTables.size() >= 10,
-                "init.sql 应解析出至少 10 张表，实际 " + ddlTables.size() + " 张；解析逻辑可能失效");
+        assertTrue(ddlTables.size() >= 12,
+                "init.sql 应解析出至少 12 张表，实际 " + ddlTables.size() + " 张；解析逻辑可能失效");
         assertTrue(ddlTables.getOrDefault("t_food_library", Set.of()).contains("calories_per_100g"),
                 "init.sql 解析结果应含 t_food_library.calories_per_100g，否则说明解析器没读懂 DDL");
-        assertTrue(entities.size() >= 10,
-                "应扫描到至少 10 个 @Entity 类，实际 " + entities.size() + " 个；扫描逻辑可能失效");
+        // 显式钉住阶段二新增的审计表：实体扫描是动态的，但若有人把建表语句从 init.sql 删掉
+        // （例如解决冲突时误删），实体侧仍会「映射到一张不存在的表」——这条断言让失败原因更直白
+        assertTrue(ddlTables.containsKey("t_ai_agent_run"),
+                "init.sql 应包含 t_ai_agent_run（Agent 运行审计表），当前解析到的表："
+                        + new TreeSet<>(ddlTables.keySet()));
+        assertTrue(entities.size() >= 12,
+                "应扫描到至少 12 个 @Entity 类，实际 " + entities.size() + " 个；扫描逻辑可能失效");
 
         List<String> problems = new ArrayList<>();
         int checkedColumns = 0;

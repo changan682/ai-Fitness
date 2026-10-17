@@ -12,6 +12,9 @@ Java BFF（Spring Boot）内网调用的 Python AI 能力服务，基于 **FastA
 > - 动作推荐：DeepSeek 生成 + **动作名白名单校验**，失败回退内置动作库规则引擎
 > - 第 7 周：RabbitMQ 每周复盘异步链路（消费 → LLM → HMAC 回调 Java）
 > - 第 8 周：**给「模拟/降级」结果加标记**，见下方「8.1 哪些结果是真、哪些是折扣」
+> - **Agent 化（阶段一）**：检索从「必经步骤」降为**可选工具** `search_knowledge`，见第 11 章
+> - **Agent 化（阶段二）**：**多步工具调用循环** + 4 个工具（3 个经 Java HMAC 工具网关查用户真实数据）
+>   + 三重上限 + 前端步骤面板，见第 11 章
 >
 > ⚠️ **Key 要单独确认**：百炼的 Embedding 与 VL 是两套模型权限，Embedding 能用不代表 VL 已开通；
 > 大模型 Key 也可能失效。开工/答辩前先跑 `scripts/check_api_keys.py`（三项探活）。
@@ -36,7 +39,9 @@ python-agent/
 │   ├── milvus_client.py   # Milvus 连接 / Collection / 索引 / 增删查 【第5周】
 │   ├── rag.py             # RAG 引擎：Embedding + 检索 + Context 拼接 【第5周】
 │   ├── knowledge_init.py  # 知识库启动初始化（幂等）【第5周】
-│   ├── agent.py           # 核心 Agent 函数（真实实现 + 本地兜底）
+│   ├── agent.py           # 核心 Agent 函数（真实实现 + 本地兜底；含单轮与多步循环两条路径）
+│   ├── agent_tools.py     # 工具定义与执行：1 个本地检索 + 3 个远程数据工具【Agent 阶段一/二】
+│   ├── tool_gateway.py    # 回调 Java 工具网关（HMAC 签名，与回调共用密钥）【Agent 阶段二】
 │   └── main.py            # FastAPI 入口 + 路由 + 全局异常处理 + 启动钩子
 ├── data/
 │   ├── seed_knowledge.json  # 知识库种子数据（200 条，5 大分类）← 最终产物
@@ -51,8 +56,10 @@ python-agent/
 │   ├── verify_weekly_plan_chain.py# 每周复盘异步链路：发送→消费→回调→验签（11 项）
 │   ├── verify_summary_layers.py   # AI 总结双层缓存/同部位对比/变更失效（12 项）
 │   ├── verify_java_ai_endpoints.py# Java /api/ai/* 六接口端到端（含 multipart 与批次 D 的问询）
+│   ├── verify_agent_stage1.py     # Agent 阶段一：检索变可选工具（11 项）
+│   ├── verify_agent_stage2.py     # Agent 阶段二：多步循环 + 工具网关 + 三重上限（12 项）
 │   └── _test_image.py             # 验收脚本共用的测试图片（宽高须 >10px，见模块注释）
-├── tests/                    # pytest（426 项）
+├── tests/                    # pytest（464 项）
 ├── Dockerfile                # 生产镜像（python:3.12-slim）
 ├── docker-entrypoint.sh      # 等 Milvus 就绪后再起 FastAPI
 ├── requirements.txt
@@ -122,6 +129,11 @@ Copy-Item .env.example .env
 | `FORCE_RELOAD_KNOWLEDGE` | `false` | **换 Embedding 模型后必须置 `true` 启动一次**，否则新旧向量语义空间不一致 |
 | `EMBEDDING_PROVIDER` | `auto` | `auto`/`dashscope`/`siliconflow`/`local`/`hashing` |
 | `ENABLE_FAULT_INJECTION` | `false` | 暴露 `GET /agent/v1/_debug/fault`，供 Java 侧验证降级链路 |
+| `AGENT_MODE_ENABLED` | `false` | Agent 模式**总闸**（阶段一/二共用）。关着时 `/agent/v1/chat` 走已验证的固定编排，行为逐字节不变 |
+| `AGENT_LOOP_MAX_STEPS` | `5` | 多步循环的步数上限 |
+| `AGENT_LOOP_TOKEN_BUDGET` | `8000` | 多步循环的 token 预算 |
+| `AGENT_LOOP_DEADLINE_SECONDS` | `25.0` | 墙钟上限，**必须小于 Java 的 `agent-read-timeout`（90s）** |
+| `JAVA_TOOL_PATH` / `JAVA_TOOL_TIMEOUT_SECONDS` | `/api/ai/tool/invoke` / `8.0` | 工具网关路径（固定）与单次超时 |
 
 ### 4.2 大模型（DeepSeek）
 
@@ -249,6 +261,7 @@ WARNING 未配置真实 Embedding（当前 provider=hashing）：RAG 检索只�
 | POST | `/agent/v1/recommend` | 动作智能推荐 | `{target_muscle, equipment:[...], count}` | `recommendations:[{action_name,target_muscle,focus_area,recommended_sets,recommended_reps,difficulty,notes,equipment}]`、`generated_at` |
 | POST | `/agent/v1/pose-evaluate` | 动作姿态评估 | `{image_base64, action_name}` | `score`、`score_level`、`issues`、`suggestions`、`good_points`、`evaluated_at`、**`data_source`** |
 | POST | `/agent/v1/chat` | 知识库 RAG 问答 | `{question, category, user_id, history:[{role,content}]}` | `question`、`answer`（Markdown）、`sources:[{category,title,content,score,`**`score_type`**`}]`、`generated_at`、**`data_source`**、**`degraded`**、**`degradation_reason`** |
+| POST | `/agent/v1/agent` | **Agent 多步问答**（阶段二） | 同上 | 同上，另加 **`steps:[{step,tool,arguments,ok,summary,elapsed_ms,error}]`**、**`agent:{steps_used,tokens,latency_ms,stopped_by,max_steps}`**、**`tool_calls`**、**`knowledge_used`** |
 | POST | `/agent/v1/body-consult` | 身体状态主动问询（批次 D） | Java 组装的快照：`{user_id, profile, latest_metric, prev_metric, trend7d, training7d, diet_days_recorded}` | `assessment`、`trend_summary`、`questions:[{id,text,why}]`、`suggestions:[{title,detail}]`、`risk_flags:[{level,text}]`、**`data_source`**（`llm` / `rule_based`）、**`degraded`**、**`degradation_reason`**、`generated_at` |
 | GET | `/agent/v1/knowledge/health` | Milvus 知识库健康 | — | `milvus_connected`、`collection_name`、`total_documents`、`last_updated`、`index_type`、`embedding_dim` |
 
@@ -332,7 +345,7 @@ question → Embedding(768维) → Milvus search(Top-5, COSINE, nprobe=4)
 | 字段 | 取值 | 含义 |
 |:---|:---|:---|
 | `pose-evaluate` 的 `data_source` | `qwen_vl` / `mock_local` | 真实看图推理 / 本地模拟打分（**不是**图像分析） |
-| `chat` 的 `data_source` | `milvus` / `builtin` / `none` | 200 条真实知识库 / 内置 18 条兜底 / 没检索到来源（纯大模型回答） |
+| `chat` 的 `data_source` | `milvus` / `llm_only` / `none` / `builtin` / **`agent`** | 200 条真实知识库 / 检索到但判定无关（改用通用知识）/ 没检索到来源 / 内置 18 条兜底 / **Agent 查到了用户真实数据** |
 | `chat` 的 `degraded` + `degradation_reason` | bool + 中文说明 | 是否走了降级路径、以及原因（直接展示给用户） |
 | `chat.sources[].score_type` | `cosine` / `heuristic` | 分数是真实余弦相似度 / 启发式合成值（**不同问题之间不可比**） |
 
@@ -379,7 +392,14 @@ E:\Anaconde\python.exe scripts/merge_seed_parts.py --dry-run
 # 8. 每周复盘异步链路（发送→消费→回调→验签，11 项；需要 Java 已启动）
 E:\Anaconde\python.exe scripts/verify_weekly_plan_chain.py
 
-# 9. Python 单元测试（在 python-agent 目录下执行，不需要联网）
+# 9. Agent 阶段一：检索变可选工具（11 项；需要 Java + Milvus）
+#    会真的调大模型，务必先开 AGENT_MODE_ENABLED=true
+E:\Anaconde\python.exe scripts/verify_agent_stage1.py
+
+# 10. Agent 阶段二：多步循环 + 工具网关 + 审计表 + 三重上限（12 项）
+E:\Anaconde\python.exe scripts/verify_agent_stage2.py
+
+# 11. Python 单元测试（在 python-agent 目录下执行，不需要联网）
 E:\Anaconde\python.exe -m pytest tests -q
 ```
 
@@ -387,8 +407,10 @@ E:\Anaconde\python.exe -m pytest tests -q
 text2vec-base-chinese）、回调签名（HMAC 覆盖 body、篡改 body 必须验签失败、时间戳偏移
 ≤5 分钟）、**姿态评估多模态链路（Prompt 组装 / 脏 JSON 容错 / 分数校验 / 看不清照片的处理）**、
 **动作推荐白名单（越界动作名必须丢弃、失败回退规则引擎）**、知识库入库工具与种子数据一致性、
-**接口层（TestClient：信封结构、错误分支、X-Trace-Id 透传）**。
-端到端部分由上面 1-7 号脚本负责。
+**接口层（TestClient：信封结构、错误分支、X-Trace-Id 透传）**、
+**Agent 工具层（`test_agent_tools.py` 21 项：schema 契约、本地/远程工具分流、越界参数、工具失败不抛出）**、
+**Agent 循环（`test_agent_loop.py` 17 项：正常单步、无工具直答、来源去重、三重上限、错误回填、`degraded` 语义两个方向）**。
+端到端部分由上面 1-10 号脚本负责。
 
 ---
 
@@ -459,3 +481,124 @@ E:\Anaconde\python.exe scripts/verify_weekly_plan_chain.py
 | 死信告警 | 规范要求「队列深度 >0 打印 ERROR 并告警」，目前是 ERROR 日志 + 管理后台可见；邮件/钉钉渠道仍预留 |
 
 搜 `TODO(` 可定位残留的待替换点。
+
+---
+
+## 11. Agent 化（两个阶段）
+
+### 11.1 为什么要改：串行 RAG 的三个问题
+
+第 5 周的问答链路是**固定编排**：`问题 → Embedding → Milvus 检索 → 拼 Context → LLM`。
+这条链路能跑，但检索是**必经步骤**，于是有三个绕不过去的问题：
+
+| 问题 | 现象 |
+|---|---|
+| 检索做无用功 | 问「我上周练得怎么样」也要先查一遍 200 条健身知识，既慢又拿到一堆无关资料 |
+| 答不了用户私有数据 | 知识库是公共健身知识，用户的训练记录/体测数据根本不在里面，这类问题只能答"我无法访问" |
+| 相关性与阈值打架 | 实测未覆盖问题的余弦分（0.8206）**高于**被覆盖问题（0.7327），纯阈值判不出「该不该用资料」，只能靠大模型自报 `[[KB:USED]]` 补救 |
+
+Agent 化就是把「检索」从一个**编排步骤**变成模型手里的一个**工具**：要不要查、查什么，由模型决定。
+
+> ⚠️ **`/agent/v1/chat` 没有被改坏**。Agent 是一条**并列的新路径**（`/agent/v1/agent`），
+> 关了开关就是原来的四层降级链路，一个字节都没动 —— 这是整次改造能回滚的前提。
+
+### 11.2 阶段一：检索变工具（`AGENT_MODE_ENABLED`）
+
+```
+问题 → LLM（带 tools）
+        ├─ 不调工具      → 直接回答（闲聊/常识，不再白烧一次检索）
+        └─ 调 search_knowledge → 拿到 Top-5 → 回填给模型 → 生成带引用的回答
+```
+
+- 单轮工具调用（最多一次往返），改动集中在 `agent_tools.py` + `llm.py` 的 `chat_with_tools()`。
+- 「这轮到底有没有用知识库」由**工具调用记录**判定（客观证据），不再依赖模型自报标记。
+- 实测（`verify_agent_stage1.py` 11/11）：
+
+| 问题类型 | 结果 |
+|---|---|
+| 数据题「我上周练得怎么样」 | `tool_calls=0` —— 模型判断不需要查知识库，不再白检索 |
+| 知识题「深蹲膝盖超过脚尖吗」 | 调用 `search_knowledge`，并**改写查询**为「深蹲膝盖超过脚尖 膝前移 动作要领」、带 `category=动作要领`；5 条命中，`best_score=0.7551` |
+
+### 11.3 阶段二：多步工具调用循环（`/agent/v1/agent`）
+
+```
+问题 → LLM（带 4 个 tools）
+        ├─ 返回 tool_calls → 执行 → 结果回填 → 再问一次 LLM（循环）
+        └─ 返回 content    → 收口成答案
+        （步数/时间/token 任一超限 → 再发一次**不带 tools** 的请求，让模型基于已有数据收口）
+```
+
+为什么必须能多步：数据题往往要先知道「上周是哪一周」，再取数，再判断要不要对比前一周。
+实测「我上周练得怎么样」只用了 1 步（`get_weekly_stats`），但设计上必须允许更多步。
+
+### 11.4 四个工具 & 工具网关（最容易搞反方向的一处）
+
+| 工具 | 位置 | 作用 |
+|---|---|---|
+| `search_knowledge` | **Python 本地** | 检索 200 条健身知识库 |
+| `get_weekly_stats` | Java 工具网关 | 某周训练天数/容量（**汇总类问题必须走它**，明细有截断，自己统计会漏数） |
+| `get_training_records` | Java 工具网关 | 按日期区间取训练明细 |
+| `get_body_trend` | Java 工具网关 | 体重/围度趋势 |
+
+**方向**：Agent 需要用户数据，而数据库在 Java 侧 → 工具是 **Python 回调 Java** 的只读网关
+`POST /api/ai/tool/invoke`（HMAC 验签，与回调共用 `HMAC_SECRET`）。
+Python 拿不到数据库连接，数据访问仍由 Java 把关 —— 引入 Agent **没有**扩大越权面。
+
+两个必须写进注释的决定：
+
+1. **路径固定**，工具名放在**签名保护的 body** 里。因为签名原文包含 path，
+   「一 tool 一路径」会让签名原文不可预测，拼错一处就是**所有工具调用都验签失败**。
+2. **工具描述里明写「绝不要自己估算」**。模型有训练数据却自己算总容量时，算出来的数字看起来完全合理，
+   但和数据库不一致 —— 这类错误在测试里查不出来，只能靠提示词堵。
+
+### 11.5 三重上限（缺一不可）
+
+| 上限 | 默认 | 少了它会怎样 |
+|---|---|---|
+| `AGENT_LOOP_MAX_STEPS` | 5 | 模型反复调工具停不下来 |
+| `AGENT_LOOP_TOKEN_BUDGET` | 8000 | 多轮上下文累积，单次问答成本可能翻十倍 |
+| `AGENT_LOOP_DEADLINE_SECONDS` | 25 | Java 先超时，用户看到「AI 服务超时」而后端还在跑 |
+
+时间预算是**嵌套**的：Python 25s < Java `agent-read-timeout` 90s < 前端 axios 90s。
+越靠前越先自己收口并返回**降级答案**，而不是让上一层超时把整个响应丢掉。
+`stopped_by` 会如实写进响应与审计表（`completed` / `max_steps` / `deadline` / `budget` / `error`）。
+
+### 11.6 `degraded` 的语义（一个真实踩过的坑）
+
+早期实现写成：
+
+```python
+degraded = stopped_by != "completed" or not knowledge_used   # ❌
+```
+
+于是「查到了用户真实训练数据、只是没用知识库」被判为降级，前端给用户弹**「降级回答」**——
+把**更好**的答案说成了打折扣的答案。正确语义是：
+
+```python
+any_tool_ok = any(step["ok"] for step in steps)
+degraded = stopped_by != "completed" or not (knowledge_used or any_tool_ok)   # ✅
+```
+
+即 `degraded` 表示「这轮真打了折扣」，只有两种情况：① 三重上限提前收口；② 一个工具都没成功、
+答案纯靠模型记忆。`tests/test_agent_loop.py` 里对这两种情况各有一条断言，方向相反，防止再改错。
+
+### 11.7 实测数据（真实环境）
+
+| 项 | 结果 |
+|---|---|
+| 阶段一验收 | 11/11 |
+| 阶段二验收 | 12/12 |
+| 数据题「我上周练得怎么样」 | 1 步 `get_weekly_stats`，3483ms，答案里的 **4200kg = 2400+1800** 与数据库一致，`data_source=agent`、`knowledge_used=false`、`stopped_by=completed`、`steps_used=1/5` |
+| 知识题「深蹲膝盖超过脚尖吗」 | 5 条来源，`data_source=milvus` |
+| 追问（第二轮） | 能接上下文（会话记忆与 Agent 兼容） |
+| 审计表 `t_ai_agent_run` | 每次运行一行，实测 `tokens` 3331 / 4152 / 2208，`tools_used` 如实记录 |
+
+### 11.8 开关与回滚
+
+| 想回到哪一步 | 怎么做 | 代价 |
+|---|---|---|
+| 退回常规问答（推荐默认） | `AGENT_MODE_ENABLED=false` | 无 —— Agent 代码不执行 |
+| 只让某次请求不走 Agent | 前端「深度分析」开关关掉 | 无 |
+| 整个 Agent 链路下线 | 前端端点改回 `/ai/chat` | 无需改 Java/Python 代码 |
+
+默认关闭是**有意的**：Agent 单次 5-15s，常规问答 2-4s，默认开会让所有人变慢。

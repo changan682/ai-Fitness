@@ -2389,11 +2389,15 @@ def chat_with_agent_loop(
         answer = _finalize_agent_answer(llm, messages, stopped_by)
 
     latency_ms = int((time.monotonic() - started) * 1000)
-    degraded = stopped_by != "completed" or not knowledge_used
+    # degraded 的语义是「这一轮打了折扣」，**不是**「没用知识库」：
+    # 用了用户真实训练/体测数据是一条**更好**的路径，不该被标成降级，
+    # 否则前端会给用户弹「降级回答」——那是误导。
+    # 真正的降级只有两种：① 因步数/时间/token 上限提前收口；② 一个工具都没成功，答案纯靠模型记忆。
+    any_tool_ok = any(bool(step.get("ok")) for step in steps)
+    degraded = stopped_by != "completed" or not (knowledge_used or any_tool_ok)
     reason = _agent_stop_reason(stopped_by, max_steps, deadline, token_budget)
     if degraded and reason is None:
-        reason = ("本轮未使用知识库（只用了用户数据工具或未调用工具），"
-                  "结论基于数据库中的真实记录")
+        reason = "本轮没有成功获取任何数据或知识依据，回答仅基于通用知识"
 
     return ChatResponse(
         question=text,
